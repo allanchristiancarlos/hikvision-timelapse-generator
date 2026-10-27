@@ -1,6 +1,6 @@
 from datetime import date
 
-from app import build_capture_times, build_channel_candidates, build_test_jpeg
+from app import build_capture_times, build_channel_candidates, build_record_search_xml, build_test_jpeg
 
 
 def test_build_capture_times_for_single_day():
@@ -23,6 +23,13 @@ def test_build_channel_candidates_includes_hikvision_numeric_variants():
     result = build_channel_candidates(2)
 
     assert result == [2, 102]
+
+
+def test_build_record_search_xml_contains_time_window():
+    xml = build_record_search_xml(2, date(2026, 10, 26), date(2026, 10, 26))
+
+    assert "<channelID>2</channelID>" in xml
+    assert "<searchType>time</searchType>" in xml
 
 
 def test_build_test_jpeg_creates_valid_bytes():

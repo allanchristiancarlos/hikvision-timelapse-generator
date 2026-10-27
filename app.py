@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 import argparse
-import base64
 import getpass
 import re
+import shutil
 import struct
+import subprocess
 import sys
+import time
 import zlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import requests
 
@@ -112,6 +115,95 @@ def find_snapshot_urls(base_url: str, channel: int):
     return list(dict.fromkeys(urls))
 
 
+def build_record_search_xml(channel: int, start_time, end_time) -> str:
+    if isinstance(start_time, date) and not isinstance(start_time, datetime):
+        start_time = datetime.combine(start_time, datetime.min.time())
+    if isinstance(end_time, date) and not isinstance(end_time, datetime):
+        end_time = datetime.combine(end_time, datetime.min.time())
+
+    return (
+        "<CMSearchDescription>"
+        f"<searchType>time</searchType>"
+        f"<channelID>{channel}</channelID>"
+        f"<startTime>{start_time.strftime('%Y-%m-%dT%H:%M:%S')}</startTime>"
+        f"<endTime>{end_time.strftime('%Y-%m-%dT%H:%M:%S')}</endTime>"
+        "<mediaType>video</mediaType>"
+        "</CMSearchDescription>"
+    )
+
+
+def extract_record_paths(xml_text: str):
+    if not xml_text:
+        return []
+
+    paths = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return paths
+
+    for elem in root.iter():
+        tag = elem.tag.lower()
+        if tag.endswith("filepath") or tag.endswith("filePath") or tag in {"filepath", "filePath", "path", "videoPath", "recordingpath", "recordingPath"}:
+            value = (elem.text or "").strip()
+            if value:
+                paths.append(value)
+    return paths
+
+
+def search_recorded_clips(session: requests.Session, host: str, channel: int, start_time: datetime, end_time: datetime):
+    search_url = f"http://{host}/ISAPI/ContentMgmt/search"
+    payload = build_record_search_xml(channel, start_time, end_time)
+    try:
+        response = session.post(search_url, data=payload, timeout=20)
+    except requests.RequestException:
+        return []
+
+    if response.status_code != 200:
+        return []
+
+    return extract_record_paths(response.text)
+
+
+def download_recorded_clip(session: requests.Session, host: str, clip_path: str, output_path: Path):
+    download_url = f"http://{host}/ISAPI/ContentMgmt/download"
+    params = {"path": clip_path}
+    try:
+        response = session.get(download_url, params=params, timeout=60, stream=True)
+    except requests.RequestException:
+        return None
+
+    if response.status_code != 200:
+        return None
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(response.content)
+    return output_path
+
+
+def extract_frame_from_video(video_path: Path, output_path: Path, at_time: datetime):
+    if not shutil.which("ffmpeg"):
+        return None
+
+    time_label = at_time.strftime("%H:%M:%S")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        time_label,
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return output_path if output_path.exists() else None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
 def capture_snapshot(session: requests.Session, base_url: str, channel: int, at_time: datetime, output_dir: Path):
     capture_time = at_time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -142,6 +234,18 @@ def capture_snapshot(session: requests.Session, base_url: str, channel: int, at_
             output_path.write_bytes(response.content)
             return output_path
 
+    clip_end = at_time + timedelta(minutes=2)
+    clip_paths = search_recorded_clips(session, base_url.replace('http://', ''), channel, at_time, clip_end)
+    for clip_path in clip_paths:
+        tmp_video = output_dir / f"{at_time.strftime('%Y-%m-%d_%H-%M')}_recording.mp4"
+        downloaded = download_recorded_clip(session, base_url.replace('http://', ''), clip_path, tmp_video)
+        if not downloaded:
+            continue
+        output_path = output_dir / f"{at_time.strftime('%Y-%m-%d_%H-%M')}.jpg"
+        extracted = extract_frame_from_video(downloaded, output_path, at_time)
+        if extracted:
+            return extracted
+
     return None
 
 
@@ -165,6 +269,7 @@ def main():
     parser.add_argument("--password", help="Hikvision password")
     parser.add_argument("--test-screenshot", action="store_true", help="Generate a sample screenshot without contacting the NVR")
     parser.add_argument("--channel-scan", action="store_true", help="Try channels 1-8 to find a working Hikvision camera number")
+    parser.add_argument("--delay-seconds", type=float, default=2.0, help="Delay between NVR requests to avoid bursts")
     args = parser.parse_args()
 
     if args.test_screenshot:
@@ -221,6 +326,8 @@ def main():
             print(f"Saved {saved_path}")
         else:
             print(f"No image returned for {timestamp.strftime('%Y-%m-%d %H:%M')}")
+        if args.delay_seconds > 0:
+            time.sleep(args.delay_seconds)
 
     print(f"Finished. Files are in {output_dir}")
     return 0
