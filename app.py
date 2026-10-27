@@ -91,12 +91,23 @@ def parse_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"Invalid date '{value}'. Expected YYYY-MM-DD.") from exc
 
 
+def build_channel_candidates(channel: int):
+    candidates = []
+    seen = set()
+    for value in [channel, channel + 100]:
+        if value not in seen and value > 0:
+            candidates.append(value)
+            seen.add(value)
+    return candidates
+
+
 def find_snapshot_urls(base_url: str, channel: int):
     urls = []
-    for channel_num in [channel, channel]:
+    for channel_num in build_channel_candidates(channel):
         urls.extend([
             f"{base_url}/ISAPI/Streaming/channels/{channel_num}/picture",
             f"{base_url}/ISAPI/VideoInput/channels/{channel_num}/picture",
+            f"{base_url}/ISAPI/Streaming/channels/{channel_num}/snapshot",
         ])
     return list(dict.fromkeys(urls))
 
@@ -105,25 +116,31 @@ def capture_snapshot(session: requests.Session, base_url: str, channel: int, at_
     capture_time = at_time.strftime("%Y-%m-%dT%H:%M:%S")
 
     for url in find_snapshot_urls(base_url, channel):
-        request_url = f"{url}?cameraTime={capture_time}"
-        try:
-            response = session.get(request_url, timeout=20, stream=True)
-        except requests.RequestException:
-            continue
+        request_variants = [url, f"{url}?cameraTime={capture_time}"]
+        if "?" not in url:
+            request_variants.append(f"{url}?cameraTime={capture_time}")
+        else:
+            request_variants.append(url)
 
-        if response.status_code != 200:
-            continue
-
-        content_type = response.headers.get("Content-Type", "")
-        if not content_type.startswith("image/"):
-            text = response.text.lower()
-            if "image" not in text and "jpg" not in text and "jpeg" not in text:
+        for request_url in request_variants:
+            try:
+                response = session.get(request_url, timeout=20, stream=True)
+            except requests.RequestException:
                 continue
 
-        output_path = output_dir / f"{at_time.strftime('%Y-%m-%d_%H-%M')}.jpg"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(response.content)
-        return output_path
+            if response.status_code != 200:
+                continue
+
+            content_type = response.headers.get("Content-Type", "")
+            if not content_type.startswith("image/"):
+                text = response.text.lower()
+                if "image" not in text and "jpg" not in text and "jpeg" not in text:
+                    continue
+
+            output_path = output_dir / f"{at_time.strftime('%Y-%m-%d_%H-%M')}.jpg"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(response.content)
+            return output_path
 
     return None
 
@@ -147,6 +164,7 @@ def main():
     parser.add_argument("--username", help="Hikvision username")
     parser.add_argument("--password", help="Hikvision password")
     parser.add_argument("--test-screenshot", action="store_true", help="Generate a sample screenshot without contacting the NVR")
+    parser.add_argument("--channel-scan", action="store_true", help="Try channels 1-8 to find a working Hikvision camera number")
     args = parser.parse_args()
 
     if args.test_screenshot:
@@ -156,6 +174,23 @@ def main():
         file_path.write_bytes(build_test_jpeg())
         print(f"Created test screenshot: {file_path}")
         return 0
+
+    if args.channel_scan:
+        for channel in range(1, 9):
+            print(f"Checking channel {channel}...")
+            try:
+                session = login_to_hikvision(args.host, args.username or prompt_for_value("Hikvision username"), args.password or getpass.getpass("Hikvision password: "))
+                output_dir = Path(args.output_dir) / "channel_scan"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.combine(args.date or date.today(), datetime.min.time())
+                saved_path = capture_snapshot(session, f"http://{args.host}", channel, timestamp, output_dir)
+                if saved_path:
+                    print(f"Working channel found: {channel}")
+                    return 0
+            except Exception:
+                continue
+        print("No working channel found in channels 1-8.")
+        return 3
 
     if not args.date:
         parser.error("--date is required unless using --test-screenshot")

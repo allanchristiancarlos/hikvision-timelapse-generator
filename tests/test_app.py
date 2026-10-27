@@ -1,6 +1,6 @@
 from datetime import date
 
-from app import build_capture_times, build_test_jpeg
+from app import build_capture_times, build_channel_candidates, build_test_jpeg
 
 
 def test_build_capture_times_for_single_day():
@@ -17,6 +17,12 @@ def test_build_capture_times_uses_custom_interval():
     assert len(result) == 12
     assert result[0].strftime("%H:%M") == "00:00"
     assert result[-1].strftime("%H:%M") == "22:00"
+
+
+def test_build_channel_candidates_includes_hikvision_numeric_variants():
+    result = build_channel_candidates(2)
+
+    assert result == [2, 102]
 
 
 def test_build_test_jpeg_creates_valid_bytes():
