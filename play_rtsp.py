@@ -402,6 +402,7 @@ def run_frame_capture(url, output, username, password, args, env):
 def main():
     args = parse_args()
     today = datetime.now().date()
+    now_dt = datetime.now()
 
     if args.interval_hours is not None and args.frames_per_day is not None:
         print("Use either --interval-hours or --frames-per-day, not both.", file=sys.stderr)
@@ -445,8 +446,8 @@ def main():
             capture_times = None
         else:
             capture_dt = parse_datetime_inputs(args.date, args.time)
-            if capture_dt.date() > today:
-                raise ValueError(f"Requested date is in the future. Use a date on or before {today.isoformat()}.")
+            if capture_dt > now_dt:
+                raise ValueError(f"Requested date/time is in the future. Use a time on or before {now_dt.strftime('%Y-%m-%d %H:%M:%S')}.")
             url = build_rtsp_url_from_time(args.host, args.track, capture_dt, args.window_seconds)
             capture_times = None
     except ValueError as exc:
@@ -527,9 +528,16 @@ def main():
                 skipped_existing = 0
                 skipped_failed = 0
                 retried_failed_today = 0
+                skipped_future = 0
                 for ts in capture_times:
                     output_path = Path("./screenshots") / f"frame_{ts.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
                     key = ts_key(ts)
+
+                    if ts > now_dt:
+                        skipped_future += 1
+                        # Do not keep failed markers for timestamps that have not happened yet.
+                        state["failed"].pop(key, None)
+                        continue
 
                     if output_path.exists():
                         skipped_existing += 1
@@ -552,6 +560,8 @@ def main():
 
                 if skipped_existing > 0:
                     print(f"Skipping {skipped_existing} already extracted frame(s) found on disk.")
+                if skipped_future > 0:
+                    print(f"Skipping {skipped_future} future frame(s) that have not happened yet.")
                 if skipped_failed > 0:
                     print(f"Skipping {skipped_failed} previously failed frame(s) from state file.")
                 if retried_failed_today > 0:
