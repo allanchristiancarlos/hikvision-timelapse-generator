@@ -3,6 +3,7 @@ import argparse
 import concurrent.futures
 import getpass
 import html
+import json
 import os
 import shutil
 import subprocess
@@ -20,12 +21,13 @@ def parse_args():
         help="Full RTSP URL (optional when using --host --date --time)",
     )
     parser.add_argument("--host", help="NVR IP or domain, for example 192.168.1.27")
-    parser.add_argument("--date", help="Recording date in YYYY-MM-DD")
+    parser.add_argument("--date", help="Recording date in YYYY-MM-DD, or range YYYY-MM-DD:YYYY-MM-DD")
     parser.add_argument("--time", help="Recording time in HH:MM or HH:MM:SS")
     parser.add_argument("--interval-hours", type=float, help="Batch mode: capture one frame every N hours for the provided --date")
     parser.add_argument("--frames-per-day", type=int, help="Batch mode: capture exactly this many evenly spaced frames across the provided --date")
     parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between batch requests to avoid overloading NVR")
     parser.add_argument("--parallel-jobs", type=int, default=1, help="Batch mode concurrency. Default is 1 (sequential). Set >1 for faster parallel captures")
+    parser.add_argument("--state-file", default="./screenshots/.extract_state.json", help="Resume state file path for batch mode")
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
     parser.add_argument("--clip-seconds", type=float, default=1.0, help="How many seconds to download before extracting a frame")
@@ -218,6 +220,37 @@ def parse_datetime_inputs(date_value: str, time_value: str) -> datetime:
     raise ValueError("Invalid --date/--time. Use --date YYYY-MM-DD and --time HH:MM or HH:MM:SS.")
 
 
+def parse_date_value(date_str: str) -> datetime:
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"Invalid date '{date_str}'. Expected YYYY-MM-DD.") from exc
+
+
+def parse_date_range(date_value: str):
+    if not date_value:
+        raise ValueError("--date is required.")
+
+    if ":" not in date_value:
+        return [parse_date_value(date_value)]
+
+    parts = date_value.split(":", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("Invalid date range. Use YYYY-MM-DD:YYYY-MM-DD.")
+
+    start = parse_date_value(parts[0])
+    end = parse_date_value(parts[1])
+    if end < start:
+        raise ValueError("Invalid date range. End date must be on or after start date.")
+
+    days = []
+    current = start
+    while current <= end:
+        days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
 def build_rtsp_url_from_time(host: str, track: int, start_dt: datetime, window_seconds: int) -> str:
     if not host:
         raise ValueError("--host is required when --url is not provided.")
@@ -257,6 +290,48 @@ def build_capture_times_for_count(target_date: datetime, frames_per_day: int):
     for i in range(frames_per_day):
         times.append(start + timedelta(seconds=i * step_seconds))
     return times
+
+
+def load_state(state_path: Path):
+    if not state_path.exists():
+        return {
+            "version": 1,
+            "updated_at": None,
+            "completed": {},
+            "failed": {},
+        }
+
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {
+            "version": 1,
+            "updated_at": None,
+            "completed": {},
+            "failed": {},
+        }
+
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("version", 1)
+    data.setdefault("updated_at", None)
+    data.setdefault("completed", {})
+    data.setdefault("failed", {})
+    if not isinstance(data["completed"], dict):
+        data["completed"] = {}
+    if not isinstance(data["failed"], dict):
+        data["failed"] = {}
+    return data
+
+
+def save_state(state_path: Path, state: dict):
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state["updated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def ts_key(ts: datetime) -> str:
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def resolve_parallel_jobs(requested_jobs: int) -> int:
@@ -370,11 +445,13 @@ def main():
                 raise ValueError("--date is required when using --interval-hours or --frames-per-day.")
             if not args.host:
                 raise ValueError("--host is required in batch mode.")
-            day_dt = datetime.strptime(args.date, "%Y-%m-%d")
-            if args.frames_per_day is not None:
-                capture_times = build_capture_times_for_count(day_dt, args.frames_per_day)
-            else:
-                capture_times = build_capture_times_for_date(day_dt, args.interval_hours)
+            days = parse_date_range(args.date)
+            capture_times = []
+            for day_dt in days:
+                if args.frames_per_day is not None:
+                    capture_times.extend(build_capture_times_for_count(day_dt, args.frames_per_day))
+                else:
+                    capture_times.extend(build_capture_times_for_date(day_dt, args.interval_hours))
             url = None
             capture_dt = None
         elif args.url:
@@ -428,9 +505,9 @@ def main():
             output = None
             parallel_jobs = resolve_parallel_jobs(args.parallel_jobs)
             if args.frames_per_day is not None:
-                print(f"Batch frame mode: {len(capture_times)} evenly spaced captures for {args.date} (parallel jobs: {parallel_jobs}).")
+                print(f"Batch frame mode: {len(capture_times)} evenly spaced captures across {args.date} (parallel jobs: {parallel_jobs}).")
             else:
-                print(f"Batch frame mode: {len(capture_times)} captures for {args.date} at {args.interval_hours} hour interval(s) (parallel jobs: {parallel_jobs}).")
+                print(f"Batch frame mode: {len(capture_times)} captures across {args.date} at {args.interval_hours} hour interval(s) (parallel jobs: {parallel_jobs}).")
         else:
             if args.output:
                 output = Path(args.output)
@@ -456,13 +533,44 @@ def main():
     try:
         if mode == "frame":
             if batch_mode:
+                state_path = Path(args.state_file)
+                state = load_state(state_path)
+                print(f"Resume state file: {state_path}")
+
+                all_items = []
+                skipped_existing = 0
+                for ts in capture_times:
+                    output_path = Path("./screenshots") / f"frame_{ts.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
+                    key = ts_key(ts)
+
+                    if output_path.exists():
+                        skipped_existing += 1
+                        state["completed"][key] = {
+                            "output": str(output_path),
+                            "completed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        }
+                        state["failed"].pop(key, None)
+                        continue
+
+                    all_items.append((ts, output_path, key))
+
+                if skipped_existing > 0:
+                    print(f"Skipping {skipped_existing} already extracted frame(s) found on disk.")
+
+                save_state(state_path, state)
+
                 success = 0
                 failures = 0
-                total = len(capture_times)
+                total = len(all_items)
                 jobs = resolve_parallel_jobs(args.parallel_jobs)
 
-                def _capture_one(index, ts):
-                    ts_output = Path("./screenshots") / f"frame_{ts.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
+                if total == 0:
+                    print("Nothing to do: all frames in range are already extracted.")
+                    overall_elapsed = time.perf_counter() - overall_started
+                    print(f"[timing] total runtime: {overall_elapsed:.2f}s")
+                    return 0
+
+                def _capture_one(index, ts, ts_output):
                     ts_output.parent.mkdir(parents=True, exist_ok=True)
                     ts_url = build_rtsp_url_from_time(args.host, args.track, ts, args.window_seconds)
                     print(f"[{index}/{total}] Capturing {ts.strftime('%Y-%m-%d %H:%M:%S')} -> {ts_output}")
@@ -470,13 +578,25 @@ def main():
                     return index, ts, ts_output
 
                 if jobs <= 1:
-                    for index, ts in enumerate(capture_times, start=1):
+                    for index, (ts, ts_output, key) in enumerate(all_items, start=1):
                         try:
-                            _, _, ts_output = _capture_one(index, ts)
+                            _, _, ts_output = _capture_one(index, ts, ts_output)
                             print(f"[{index}/{total}] Saved {ts_output}")
+                            state["completed"][key] = {
+                                "output": str(ts_output),
+                                "completed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            }
+                            state["failed"].pop(key, None)
+                            save_state(state_path, state)
                             success += 1
-                        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                        except Exception as exc:
                             print(f"[{index}/{total}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                            state["failed"][key] = {
+                                "output": str(ts_output),
+                                "error": str(exc),
+                                "failed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            }
+                            save_state(state_path, state)
                             failures += 1
 
                         if index < total and args.delay_seconds > 0:
@@ -485,21 +605,33 @@ def main():
                 else:
                     future_to_meta = {}
                     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-                        for index, ts in enumerate(capture_times, start=1):
-                            future = executor.submit(_capture_one, index, ts)
-                            future_to_meta[future] = (index, ts)
+                        for index, (ts, ts_output, key) in enumerate(all_items, start=1):
+                            future = executor.submit(_capture_one, index, ts, ts_output)
+                            future_to_meta[future] = (index, ts, ts_output, key)
                             if index < total and args.delay_seconds > 0:
                                 # Stagger submissions to reduce burst pressure on NVR.
                                 time.sleep(args.delay_seconds)
 
                         for future in concurrent.futures.as_completed(future_to_meta):
-                            index, ts = future_to_meta[future]
+                            index, ts, ts_output, key = future_to_meta[future]
                             try:
                                 _, _, ts_output = future.result()
                                 print(f"[{index}/{total}] Saved {ts_output}")
+                                state["completed"][key] = {
+                                    "output": str(ts_output),
+                                    "completed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                }
+                                state["failed"].pop(key, None)
+                                save_state(state_path, state)
                                 success += 1
-                            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                            except Exception as exc:
                                 print(f"[{index}/{total}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                                state["failed"][key] = {
+                                    "output": str(ts_output),
+                                    "error": str(exc),
+                                    "failed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                }
+                                save_state(state_path, state)
                                 failures += 1
 
                 print(f"Batch complete: {success} succeeded, {failures} failed")
