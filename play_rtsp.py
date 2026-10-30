@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,11 @@ def parse_args():
     parser.add_argument("--host", help="NVR IP or domain, for example 192.168.1.27")
     parser.add_argument("--date", help="Recording date in YYYY-MM-DD, or range YYYY-MM-DD:YYYY-MM-DD")
     parser.add_argument("--time", help="Recording time in HH:MM or HH:MM:SS")
+    parser.add_argument("--render-video", action="store_true", help="Render/append a 30fps video from extracted frame images")
+    parser.add_argument("--frames-dir", default="./screenshots", help="Folder containing extracted frame_*.jpg files")
+    parser.add_argument("--video-output", default="./screenshots/timelapse.mp4", help="Rendered output video path")
+    parser.add_argument("--video-fps", type=int, default=24, help="Output video FPS for render-video mode")
+    parser.add_argument("--rerender-all", action="store_true", help="Render video from all frames again, ignoring incremental state")
     parser.add_argument("--interval-hours", type=float, help="Batch mode: capture one frame every N hours for the provided --date")
     parser.add_argument("--frames-per-day", type=int, help="Batch mode: capture exactly this many evenly spaced frames across the provided --date")
     parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between batch requests to avoid overloading NVR")
@@ -334,6 +340,179 @@ def ts_key(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def collect_frame_images(frames_dir: Path):
+    return sorted(frames_dir.glob("frame_*.jpg"))
+
+
+def write_image_concat_list(frame_paths, fps: int, list_path: Path):
+    frame_duration = 1.0 / float(fps)
+    lines = []
+    for frame in frame_paths:
+        escaped = str(frame.resolve()).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+        lines.append(f"duration {frame_duration:.10f}")
+    # Repeat last frame once, required by concat demuxer duration handling.
+    if frame_paths:
+        escaped = str(frame_paths[-1].resolve()).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_video_segment_from_frames(frame_paths, fps: int, output_path: Path, env):
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        list_path = Path(f.name)
+    try:
+        write_image_concat_list(frame_paths, fps, list_path)
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostdin",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-fps_mode",
+            "cfr",
+            "-r",
+            str(fps),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        timed_subprocess_run(command, check=True, env=env, timeout=None, label="video segment render")
+    finally:
+        if list_path.exists():
+            list_path.unlink()
+
+
+def concat_videos(existing_video: Path, appended_video: Path, output_video: Path, env):
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        list_path = Path(f.name)
+    try:
+        lines = []
+        for path in [existing_video, appended_video]:
+            escaped = str(path.resolve()).replace("'", "'\\''")
+            lines.append(f"file '{escaped}'")
+        list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostdin",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(output_video),
+        ]
+        timed_subprocess_run(command, check=True, env=env, timeout=None, label="video concat append")
+    finally:
+        if list_path.exists():
+            list_path.unlink()
+
+
+def render_incremental_video(args, env):
+    frames_dir = Path(args.frames_dir)
+    output_video = Path(args.video_output)
+    fps = args.video_fps
+    if fps <= 0:
+        raise ValueError("--video-fps must be greater than 0.")
+
+    if not frames_dir.exists():
+        raise ValueError(f"Frames folder does not exist: {frames_dir}")
+
+    state_path = Path(args.state_file)
+    state = load_state(state_path)
+    state.setdefault("video_renders", {})
+    render_key = str(output_video.resolve())
+    render_state = state["video_renders"].get(render_key, {
+        "fps": fps,
+        "rendered_frames": [],
+        "updated_at": None,
+    })
+
+    all_frames = collect_frame_images(frames_dir)
+    if not all_frames:
+        print("No frame images found to render.")
+        return 0
+
+    rendered_names = set(render_state.get("rendered_frames", []))
+
+    if args.rerender_all:
+        print("Rerender-all enabled: rebuilding video from all frames.")
+        rendered_names = set()
+        render_state["rendered_frames"] = []
+
+    # Bootstrap if an old video exists but state has no history.
+    if output_video.exists() and not rendered_names and not args.rerender_all:
+        video_mtime = output_video.stat().st_mtime
+        inferred_rendered = [f.name for f in all_frames if f.stat().st_mtime <= video_mtime]
+        if inferred_rendered:
+            render_state["rendered_frames"] = inferred_rendered
+            rendered_names = set(inferred_rendered)
+            print(f"Bootstrapped render state with {len(inferred_rendered)} existing frame(s).")
+
+    new_frames = [f for f in all_frames if f.name not in rendered_names]
+    if not new_frames:
+        print("No new frames to append. Video is up to date.")
+        state["video_renders"][render_key] = render_state
+        save_state(state_path, state)
+        return 0
+
+    print(f"Rendering {len(new_frames)} new frame(s) at {fps} fps.")
+    output_video.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_segment = output_video.with_suffix(".append_segment.mp4")
+    temp_merged = output_video.with_suffix(".merged.mp4")
+    temp_existing = output_video.with_suffix(".existing.mp4")
+
+    try:
+        build_video_segment_from_frames(new_frames, fps, temp_segment, env)
+
+        if output_video.exists() and output_video.stat().st_size > 0 and not args.rerender_all:
+            if temp_existing.exists():
+                temp_existing.unlink()
+            output_video.replace(temp_existing)
+            concat_videos(temp_existing, temp_segment, temp_merged, env)
+            temp_merged.replace(output_video)
+        else:
+            temp_segment.replace(output_video)
+
+        rendered_list = render_state.get("rendered_frames", [])
+        rendered_list.extend([f.name for f in new_frames])
+        render_state["rendered_frames"] = rendered_list
+        render_state["fps"] = fps
+        render_state["updated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        render_state["output"] = str(output_video)
+
+        state["video_renders"][render_key] = render_state
+        save_state(state_path, state)
+
+        print(f"Video ready: {output_video}")
+        return 0
+    finally:
+        for tmp in [temp_segment, temp_merged, temp_existing]:
+            if tmp.exists():
+                tmp.unlink()
+
+
 def resolve_parallel_jobs(requested_jobs: int) -> int:
     if requested_jobs is not None and requested_jobs > 0:
         return requested_jobs
@@ -416,6 +595,18 @@ def main():
         print("ffplay is not installed or not in PATH. Install ffmpeg to get ffplay.", file=sys.stderr)
         return 2
 
+    env = os.environ.copy()
+    if "XDG_RUNTIME_DIR" not in env:
+        env["XDG_RUNTIME_DIR"] = "/tmp/xdg-runtime"
+        Path(env["XDG_RUNTIME_DIR"]).mkdir(parents=True, exist_ok=True)
+
+    if args.render_video:
+        try:
+            return render_incremental_video(args, env)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
     batch_mode = args.interval_hours is not None or args.frames_per_day is not None
     try:
         if batch_mode:
@@ -463,11 +654,6 @@ def main():
     mode = args.mode
     if mode == "auto":
         mode = "play" if has_display() else "record"
-
-    env = os.environ.copy()
-    if "XDG_RUNTIME_DIR" not in env:
-        env["XDG_RUNTIME_DIR"] = "/tmp/xdg-runtime"
-        Path(env["XDG_RUNTIME_DIR"]).mkdir(parents=True, exist_ok=True)
 
     if mode == "play" and not has_display():
         print("No GUI display detected in container. Use --mode record or run with X forwarding.", file=sys.stderr)
