@@ -10,6 +10,8 @@ import time
 import zlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Optional, Union
+from urllib.parse import quote, urlparse, urlunparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -58,6 +60,42 @@ def build_test_jpeg() -> bytes:
     png += chunk(b"IDAT", zlib.compress(raw_data))
     png += chunk(b"IEND", b"")
     return png
+
+
+def with_basic_auth(rtsp_url: str, username: str, password: str) -> str:
+    parsed = urlparse(rtsp_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"Invalid RTSP URL: {rtsp_url}")
+
+    host = parsed.hostname or parsed.netloc
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+
+    username_part = quote(username, safe="")
+    password_part = quote(password, safe="")
+    netloc = f"{username_part}:{password_part}@{host}"
+    rebuilt = parsed._replace(netloc=netloc)
+    return urlunparse(rebuilt)
+
+
+def build_ffmpeg_download_command(rtsp_url: str, output_path: str, username: Optional[str] = None, password: Optional[str] = None, duration_seconds: Optional[Union[float, int]] = None, transport: str = "tcp") -> list:
+    command = ["ffmpeg", "-y", "-rtsp_transport", transport]
+    if username and password:
+        command.extend(["-user", username, "-password", password])
+    command.extend(["-i", rtsp_url])
+    if duration_seconds is not None and duration_seconds > 0:
+        command.extend(["-t", str(duration_seconds)])
+    command.extend(["-c", "copy", "-movflags", "faststart", output_path])
+    return command
+
+
+def download_rtsp_stream(rtsp_url: str, output_path: str, username: Optional[str] = None, password: Optional[str] = None, duration_seconds: Optional[Union[float, int]] = None):
+    command = build_ffmpeg_download_command(rtsp_url, output_path, username=username, password=password, duration_seconds=duration_seconds)
+    try:
+        subprocess.run(command, check=True)
+        return Path(output_path)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise RuntimeError(f"ffmpeg failed while downloading RTSP stream: {exc}") from exc
 
 
 def login_to_hikvision(host: str, username: str, password: str) -> requests.Session:

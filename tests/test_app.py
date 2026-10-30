@@ -37,3 +37,25 @@ def test_build_test_jpeg_creates_valid_bytes():
 
     assert data.startswith(b"\x89PNG")
     assert len(data) > 100
+
+
+def test_build_ffmpeg_download_command_includes_auth_and_output():
+    from app import build_ffmpeg_download_command
+
+    command = build_ffmpeg_download_command(
+        "rtsp://example.local/stream",
+        "/tmp/example.mp4",
+        username="demo",
+        password="secret",
+        duration_seconds=30,
+    )
+
+    assert command[:3] == ["ffmpeg", "-y", "-rtsp_transport"]
+    assert "-user" in command
+    assert "demo" in command
+    assert "-password" in command
+    assert "secret" in command
+    assert "rtsp://example.local/stream" in command
+    assert "/tmp/example.mp4" in command
+    assert "-t" in command
+    assert "30" in command
