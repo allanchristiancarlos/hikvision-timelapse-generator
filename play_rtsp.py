@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
@@ -22,7 +23,7 @@ def parse_args():
     parser.add_argument("--time", help="Recording time in HH:MM or HH:MM:SS")
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
-    parser.add_argument("--clip-seconds", type=float, default=2.0, help="How many seconds to download before extracting a frame")
+    parser.add_argument("--clip-seconds", type=float, default=1.0, help="How many seconds to download before extracting a frame")
     parser.add_argument("--frame-offset-seconds", type=float, default=1.0, help="Offset inside the downloaded clip for the output frame")
     parser.add_argument("--connect-timeout-seconds", type=float, default=5.0, help="RTSP connect/read timeout in seconds")
     parser.add_argument("--username", help="RTSP basic auth username")
@@ -183,6 +184,21 @@ def redacted_command(command):
     return redacted
 
 
+def timed_subprocess_run(command, *, env, timeout, label, check=True):
+    started = time.perf_counter()
+    print(f"[timing] {label} started")
+    try:
+        result = subprocess.run(command, check=check, env=env, timeout=timeout)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        elapsed = time.perf_counter() - started
+        print(f"[timing] {label} failed after {elapsed:.2f}s")
+        raise
+
+    elapsed = time.perf_counter() - started
+    print(f"[timing] {label} completed in {elapsed:.2f}s")
+    return result
+
+
 def parse_datetime_inputs(date_value: str, time_value: str) -> datetime:
     if not date_value or not time_value:
         raise ValueError("Both --date and --time are required when --url is not provided.")
@@ -317,23 +333,49 @@ def main():
         print("frame:", " ".join(redacted_command(frame_command)))
     else:
         print(" ".join(redacted_command(command)))
+    overall_started = time.perf_counter()
     try:
         if mode == "frame":
             clip_timeout = max(10.0, args.connect_timeout_seconds + args.clip_seconds + 10.0)
             fallback_clip_timeout = max(20.0, args.connect_timeout_seconds + args.clip_seconds + 35.0)
             frame_timeout = 20.0
+            print(f"[timing] configured timeouts -> clip: {clip_timeout:.1f}s, fallback clip: {fallback_clip_timeout:.1f}s, frame extract: {frame_timeout:.1f}s")
             try:
-                subprocess.run(clip_command, check=True, env=env, timeout=clip_timeout)
+                timed_subprocess_run(
+                    clip_command,
+                    check=True,
+                    env=env,
+                    timeout=clip_timeout,
+                    label="fast clip download",
+                )
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
                 if tmp_clip.exists():
                     tmp_clip.unlink()
                 print("Fast clip capture failed, retrying with tolerant probe settings...")
-                subprocess.run(clip_command_fallback, check=True, env=env, timeout=fallback_clip_timeout)
-            subprocess.run(frame_command, check=True, env=env, timeout=frame_timeout)
+                timed_subprocess_run(
+                    clip_command_fallback,
+                    check=True,
+                    env=env,
+                    timeout=fallback_clip_timeout,
+                    label="fallback clip download",
+                )
+            timed_subprocess_run(
+                frame_command,
+                check=True,
+                env=env,
+                timeout=frame_timeout,
+                label="frame extraction",
+            )
             if tmp_clip.exists():
                 tmp_clip.unlink()
         else:
-            subprocess.run(command, check=True, env=env)
+            timed_subprocess_run(
+                command,
+                check=True,
+                env=env,
+                timeout=None,
+                label=f"{mode} execution",
+            )
     except FileNotFoundError:
         print("Required ffmpeg command not found.", file=sys.stderr)
         return 2
@@ -352,6 +394,9 @@ def main():
         print(f"Recording complete: {args.output}")
     if mode == "frame":
         print(f"Frame captured: {output}")
+
+    overall_elapsed = time.perf_counter() - overall_started
+    print(f"[timing] total runtime: {overall_elapsed:.2f}s")
 
     return 0
 
