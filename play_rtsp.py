@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import concurrent.futures
 import getpass
 import html
 import os
@@ -24,6 +25,7 @@ def parse_args():
     parser.add_argument("--interval-hours", type=float, help="Batch mode: capture one frame every N hours for the provided --date")
     parser.add_argument("--frames-per-day", type=int, help="Batch mode: capture exactly this many evenly spaced frames across the provided --date")
     parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between batch requests to avoid overloading NVR")
+    parser.add_argument("--parallel-jobs", type=int, default=0, help="Batch mode concurrency. 0 = auto based on CPU cores (capped for NVR safety)")
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
     parser.add_argument("--clip-seconds", type=float, default=1.0, help="How many seconds to download before extracting a frame")
@@ -257,6 +259,15 @@ def build_capture_times_for_count(target_date: datetime, frames_per_day: int):
     return times
 
 
+def resolve_parallel_jobs(requested_jobs: int) -> int:
+    if requested_jobs is not None and requested_jobs > 0:
+        return requested_jobs
+
+    cpu_count = os.cpu_count() or 1
+    # Conservative default: use half of cores but cap to 4 to avoid overloading NVR.
+    return max(1, min(4, cpu_count // 2 if cpu_count > 1 else 1))
+
+
 def run_frame_capture(url, output, username, password, args, env):
     tmp_clip = output.with_suffix(".tmp.ts")
     if tmp_clip.exists():
@@ -357,6 +368,8 @@ def main():
         if batch_mode:
             if not args.date:
                 raise ValueError("--date is required when using --interval-hours or --frames-per-day.")
+            if not args.host:
+                raise ValueError("--host is required in batch mode.")
             day_dt = datetime.strptime(args.date, "%Y-%m-%d")
             if args.frames_per_day is not None:
                 capture_times = build_capture_times_for_count(day_dt, args.frames_per_day)
@@ -413,10 +426,11 @@ def main():
     elif mode == "frame":
         if batch_mode:
             output = None
+            parallel_jobs = resolve_parallel_jobs(args.parallel_jobs)
             if args.frames_per_day is not None:
-                print(f"Batch frame mode: {len(capture_times)} evenly spaced captures for {args.date}.")
+                print(f"Batch frame mode: {len(capture_times)} evenly spaced captures for {args.date} (parallel jobs: {parallel_jobs}).")
             else:
-                print(f"Batch frame mode: {len(capture_times)} captures for {args.date} at {args.interval_hours} hour interval(s).")
+                print(f"Batch frame mode: {len(capture_times)} captures for {args.date} at {args.interval_hours} hour interval(s) (parallel jobs: {parallel_jobs}).")
         else:
             if args.output:
                 output = Path(args.output)
@@ -444,23 +458,49 @@ def main():
             if batch_mode:
                 success = 0
                 failures = 0
-                for index, ts in enumerate(capture_times, start=1):
+                total = len(capture_times)
+                jobs = resolve_parallel_jobs(args.parallel_jobs)
+
+                def _capture_one(index, ts):
                     ts_output = Path("./screenshots") / f"frame_{ts.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
                     ts_output.parent.mkdir(parents=True, exist_ok=True)
                     ts_url = build_rtsp_url_from_time(args.host, args.track, ts, args.window_seconds)
+                    print(f"[{index}/{total}] Capturing {ts.strftime('%Y-%m-%d %H:%M:%S')} -> {ts_output}")
+                    run_frame_capture(ts_url, ts_output, username, password, args, env)
+                    return index, ts, ts_output
 
-                    print(f"[{index}/{len(capture_times)}] Capturing {ts.strftime('%Y-%m-%d %H:%M:%S')} -> {ts_output}")
-                    try:
-                        run_frame_capture(ts_url, ts_output, username, password, args, env)
-                        print(f"[{index}/{len(capture_times)}] Saved {ts_output}")
-                        success += 1
-                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                        print(f"[{index}/{len(capture_times)}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
-                        failures += 1
+                if jobs <= 1:
+                    for index, ts in enumerate(capture_times, start=1):
+                        try:
+                            _, _, ts_output = _capture_one(index, ts)
+                            print(f"[{index}/{total}] Saved {ts_output}")
+                            success += 1
+                        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                            print(f"[{index}/{total}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                            failures += 1
 
-                    if index < len(capture_times) and args.delay_seconds > 0:
-                        print(f"[timing] sleeping {args.delay_seconds:.2f}s before next interval")
-                        time.sleep(args.delay_seconds)
+                        if index < total and args.delay_seconds > 0:
+                            print(f"[timing] sleeping {args.delay_seconds:.2f}s before next interval")
+                            time.sleep(args.delay_seconds)
+                else:
+                    future_to_meta = {}
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+                        for index, ts in enumerate(capture_times, start=1):
+                            future = executor.submit(_capture_one, index, ts)
+                            future_to_meta[future] = (index, ts)
+                            if index < total and args.delay_seconds > 0:
+                                # Stagger submissions to reduce burst pressure on NVR.
+                                time.sleep(args.delay_seconds)
+
+                        for future in concurrent.futures.as_completed(future_to_meta):
+                            index, ts = future_to_meta[future]
+                            try:
+                                _, _, ts_output = future.result()
+                                print(f"[{index}/{total}] Saved {ts_output}")
+                                success += 1
+                            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                                print(f"[{index}/{total}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                                failures += 1
 
                 print(f"Batch complete: {success} succeeded, {failures} failed")
                 if failures > 0:
