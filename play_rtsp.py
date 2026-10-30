@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--interval-hours", type=float, help="Batch mode: capture one frame every N hours for the provided --date")
     parser.add_argument("--frames-per-day", type=int, help="Batch mode: capture exactly this many evenly spaced frames across the provided --date")
     parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between batch requests to avoid overloading NVR")
-    parser.add_argument("--parallel-jobs", type=int, default=0, help="Batch mode concurrency. 0 = auto based on CPU cores (capped for NVR safety)")
+    parser.add_argument("--parallel-jobs", type=int, default=1, help="Batch mode concurrency. Default is 1 (sequential). Set >1 for faster parallel captures")
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
     parser.add_argument("--clip-seconds", type=float, default=1.0, help="How many seconds to download before extracting a frame")
