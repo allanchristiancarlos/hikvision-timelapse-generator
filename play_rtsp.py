@@ -348,16 +348,6 @@ def run_frame_capture(url, output, username, password, args, env):
     if tmp_clip.exists():
         tmp_clip.unlink()
 
-    clip_command = build_ffmpeg_clip_command(
-        url,
-        str(tmp_clip),
-        username=username,
-        password=password,
-        transport=args.transport,
-        duration_seconds=args.clip_seconds,
-        timeout_seconds=args.connect_timeout_seconds,
-        relaxed=False,
-    )
     clip_command_fallback = build_ffmpeg_clip_command(
         url,
         str(tmp_clip),
@@ -381,35 +371,21 @@ def run_frame_capture(url, output, username, password, args, env):
         frame_offset_seconds=effective_frame_offset,
     )
 
-    print("clip:", " ".join(redacted_command(clip_command)))
-    print("clip fallback:", " ".join(redacted_command(clip_command_fallback)))
+    print("clip:", " ".join(redacted_command(clip_command_fallback)))
     print("frame:", " ".join(redacted_command(frame_command)))
 
-    clip_timeout = max(4.0, args.connect_timeout_seconds + args.clip_seconds - 1.0)
     fallback_clip_timeout = max(10.0, args.connect_timeout_seconds + args.clip_seconds + 4.0)
     frame_timeout = 8.0
-    print(f"[timing] configured timeouts -> clip: {clip_timeout:.1f}s, fallback clip: {fallback_clip_timeout:.1f}s, frame extract: {frame_timeout:.1f}s")
+    print(f"[timing] configured timeouts -> clip: {fallback_clip_timeout:.1f}s, frame extract: {frame_timeout:.1f}s")
 
     try:
-        try:
-            timed_subprocess_run(
-                clip_command,
-                check=True,
-                env=env,
-                timeout=clip_timeout,
-                label="fast clip download",
-            )
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-            if tmp_clip.exists():
-                tmp_clip.unlink()
-            print("Fast clip capture failed, retrying with tolerant probe settings...")
-            timed_subprocess_run(
-                clip_command_fallback,
-                check=True,
-                env=env,
-                timeout=fallback_clip_timeout,
-                label="fallback clip download",
-            )
+        timed_subprocess_run(
+            clip_command_fallback,
+            check=True,
+            env=env,
+            timeout=fallback_clip_timeout,
+            label="clip download",
+        )
 
         timed_subprocess_run(
             frame_command,
@@ -425,6 +401,7 @@ def run_frame_capture(url, output, username, password, args, env):
 
 def main():
     args = parse_args()
+    today = datetime.now().date()
 
     if args.interval_hours is not None and args.frames_per_day is not None:
         print("Use either --interval-hours or --frames-per-day, not both.", file=sys.stderr)
@@ -446,6 +423,13 @@ def main():
             if not args.host:
                 raise ValueError("--host is required in batch mode.")
             days = parse_date_range(args.date)
+            original_day_count = len(days)
+            days = [d for d in days if d.date() <= today]
+            skipped_future_days = original_day_count - len(days)
+            if skipped_future_days > 0:
+                print(f"Ignoring {skipped_future_days} future day(s) after {today.isoformat()}.")
+            if not days:
+                raise ValueError(f"All requested dates are in the future. Use a date on or before {today.isoformat()}.")
             capture_times = []
             for day_dt in days:
                 if args.frames_per_day is not None:
@@ -461,6 +445,8 @@ def main():
             capture_times = None
         else:
             capture_dt = parse_datetime_inputs(args.date, args.time)
+            if capture_dt.date() > today:
+                raise ValueError(f"Requested date is in the future. Use a date on or before {today.isoformat()}.")
             url = build_rtsp_url_from_time(args.host, args.track, capture_dt, args.window_seconds)
             capture_times = None
     except ValueError as exc:
@@ -539,6 +525,7 @@ def main():
 
                 all_items = []
                 skipped_existing = 0
+                skipped_failed = 0
                 for ts in capture_times:
                     output_path = Path("./screenshots") / f"frame_{ts.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
                     key = ts_key(ts)
@@ -552,10 +539,16 @@ def main():
                         state["failed"].pop(key, None)
                         continue
 
+                    if key in state["failed"]:
+                        skipped_failed += 1
+                        continue
+
                     all_items.append((ts, output_path, key))
 
                 if skipped_existing > 0:
                     print(f"Skipping {skipped_existing} already extracted frame(s) found on disk.")
+                if skipped_failed > 0:
+                    print(f"Skipping {skipped_failed} previously failed frame(s) from state file.")
 
                 save_state(state_path, state)
 
