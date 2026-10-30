@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import calendar
 import concurrent.futures
 import getpass
 import html
@@ -344,6 +345,18 @@ def collect_frame_images(frames_dir: Path):
     return sorted(frames_dir.glob("frame_*.jpg"))
 
 
+def parse_frame_timestamp(frame_path: Path):
+    # Expected file name: frame_YYYY-MM-DD_HH-MM-SS.jpg
+    name = frame_path.name
+    if not (name.startswith("frame_") and name.endswith(".jpg")):
+        return None
+    body = name[len("frame_"):-len(".jpg")]
+    try:
+        return datetime.strptime(body, "%Y-%m-%d_%H-%M-%S")
+    except ValueError:
+        return None
+
+
 def write_image_concat_list(frame_paths, fps: int, list_path: Path):
     frame_duration = 1.0 / float(fps)
     lines = []
@@ -428,18 +441,7 @@ def concat_videos(existing_video: Path, appended_video: Path, output_video: Path
             list_path.unlink()
 
 
-def render_incremental_video(args, env):
-    frames_dir = Path(args.frames_dir)
-    output_video = Path(args.video_output)
-    fps = args.video_fps
-    if fps <= 0:
-        raise ValueError("--video-fps must be greater than 0.")
-
-    if not frames_dir.exists():
-        raise ValueError(f"Frames folder does not exist: {frames_dir}")
-
-    state_path = Path(args.state_file)
-    state = load_state(state_path)
+def render_video_target(frame_paths, output_video: Path, fps: int, state: dict, rerender_all: bool, env, label: str):
     state.setdefault("video_renders", {})
     render_key = str(output_video.resolve())
     render_state = state["video_renders"].get(render_key, {
@@ -448,35 +450,31 @@ def render_incremental_video(args, env):
         "updated_at": None,
     })
 
-    all_frames = collect_frame_images(frames_dir)
-    if not all_frames:
-        print("No frame images found to render.")
-        return 0
-
     rendered_names = set(render_state.get("rendered_frames", []))
-
-    if args.rerender_all:
-        print("Rerender-all enabled: rebuilding video from all frames.")
+    if rerender_all:
+        print(f"Rerender-all enabled: rebuilding {output_video.name} from all {label} frames.")
         rendered_names = set()
         render_state["rendered_frames"] = []
 
     # Bootstrap if an old video exists but state has no history.
-    if output_video.exists() and not rendered_names and not args.rerender_all:
+    if output_video.exists() and not rendered_names and not rerender_all:
         video_mtime = output_video.stat().st_mtime
-        inferred_rendered = [f.name for f in all_frames if f.stat().st_mtime <= video_mtime]
+        inferred_rendered = [f.name for f in frame_paths if f.stat().st_mtime <= video_mtime]
         if inferred_rendered:
             render_state["rendered_frames"] = inferred_rendered
             rendered_names = set(inferred_rendered)
-            print(f"Bootstrapped render state with {len(inferred_rendered)} existing frame(s).")
+            print(f"Bootstrapped {output_video.name} state with {len(inferred_rendered)} frame(s).")
 
-    new_frames = [f for f in all_frames if f.name not in rendered_names]
+    new_frames = [f for f in frame_paths if f.name not in rendered_names]
     if not new_frames:
-        print("No new frames to append. Video is up to date.")
+        if output_video.exists():
+            print(f"No new {label} frames for {output_video.name}; skipping.")
+        else:
+            print(f"No {label} frames available to render {output_video.name}; skipping.")
         state["video_renders"][render_key] = render_state
-        save_state(state_path, state)
-        return 0
+        return
 
-    print(f"Rendering {len(new_frames)} new frame(s) at {fps} fps.")
+    print(f"Rendering {len(new_frames)} new {label} frame(s) at {fps} fps -> {output_video.name}")
     output_video.parent.mkdir(parents=True, exist_ok=True)
 
     temp_segment = output_video.with_suffix(".append_segment.mp4")
@@ -486,7 +484,7 @@ def render_incremental_video(args, env):
     try:
         build_video_segment_from_frames(new_frames, fps, temp_segment, env)
 
-        if output_video.exists() and output_video.stat().st_size > 0 and not args.rerender_all:
+        if output_video.exists() and output_video.stat().st_size > 0 and not rerender_all:
             if temp_existing.exists():
                 temp_existing.unlink()
             output_video.replace(temp_existing)
@@ -501,16 +499,64 @@ def render_incremental_video(args, env):
         render_state["fps"] = fps
         render_state["updated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         render_state["output"] = str(output_video)
-
         state["video_renders"][render_key] = render_state
-        save_state(state_path, state)
 
         print(f"Video ready: {output_video}")
-        return 0
     finally:
         for tmp in [temp_segment, temp_merged, temp_existing]:
             if tmp.exists():
                 tmp.unlink()
+
+
+def render_incremental_video(args, env):
+    frames_dir = Path(args.frames_dir)
+    output_video = Path(args.video_output)
+    fps = args.video_fps
+    if fps <= 0:
+        raise ValueError("--video-fps must be greater than 0.")
+
+    if not frames_dir.exists():
+        raise ValueError(f"Frames folder does not exist: {frames_dir}")
+
+    state_path = Path(args.state_file)
+    state = load_state(state_path)
+
+    all_frames = collect_frame_images(frames_dir)
+    if not all_frames:
+        print("No frame images found to render.")
+        return 0
+
+    # Render full timeline output (incremental unless --rerender-all).
+    render_video_target(all_frames, output_video, fps, state, args.rerender_all, env, label="full")
+
+    # Render per-month outputs like timelapse-oct.mp4.
+    frames_by_month = {}
+    for frame in all_frames:
+        ts = parse_frame_timestamp(frame)
+        if ts is None:
+            continue
+        month_num = ts.month
+        frames_by_month.setdefault(month_num, []).append(frame)
+
+    stem = output_video.stem
+    suffix = output_video.suffix
+    parent = output_video.parent
+
+    for month_num in sorted(frames_by_month.keys()):
+        month_short = calendar.month_abbr[month_num].lower()
+        monthly_output = parent / f"{stem}-{month_short}{suffix}"
+        render_video_target(
+            frames_by_month[month_num],
+            monthly_output,
+            fps,
+            state,
+            args.rerender_all,
+            env,
+            label=f"{month_short}",
+        )
+
+    save_state(state_path, state)
+    return 0
 
 
 def resolve_parallel_jobs(requested_jobs: int) -> int:
