@@ -22,9 +22,9 @@ def parse_args():
     parser.add_argument("--time", help="Recording time in HH:MM or HH:MM:SS")
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
-    parser.add_argument("--clip-seconds", type=float, default=3.0, help="How many seconds to download before extracting a frame")
+    parser.add_argument("--clip-seconds", type=float, default=2.0, help="How many seconds to download before extracting a frame")
     parser.add_argument("--frame-offset-seconds", type=float, default=1.0, help="Offset inside the downloaded clip for the output frame")
-    parser.add_argument("--connect-timeout-seconds", type=float, default=15.0, help="RTSP connect/read timeout in seconds")
+    parser.add_argument("--connect-timeout-seconds", type=float, default=5.0, help="RTSP connect/read timeout in seconds")
     parser.add_argument("--username", help="RTSP basic auth username")
     parser.add_argument("--password", help="RTSP basic auth password")
     parser.add_argument(
@@ -88,15 +88,15 @@ def build_ffmpeg_frame_command(rtsp_url: str, output_path: str, username: str = 
     command = ["ffmpeg", "-y", "-rtsp_transport", transport, "-i", rtsp_url]
     if no_audio:
         command.append("-an")
-    command.extend(["-frames:v", "1", "-q:v", "2", output_path])
+    command.extend(["-frames:v", "1", "-q:v", "2", "-update", "1", output_path])
     return command
 
 
-def build_ffmpeg_clip_command(rtsp_url: str, output_path: str, username: str = None, password: str = None, transport: str = "tcp", duration_seconds: float = 3.0, timeout_seconds: float = 15.0):
+def build_ffmpeg_direct_frame_command(rtsp_url: str, output_path: str, username: str = None, password: str = None, transport: str = "tcp"):
     if username and password:
         rtsp_url = with_basic_auth(rtsp_url, username, password)
 
-    command = [
+    return [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
@@ -111,6 +111,38 @@ def build_ffmpeg_clip_command(rtsp_url: str, output_path: str, username: str = N
         "32768",
         "-fflags",
         "nobuffer",
+        "-i",
+        rtsp_url,
+        "-an",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        "-update",
+        "1",
+        output_path,
+    ]
+
+
+def build_ffmpeg_clip_command(rtsp_url: str, output_path: str, username: str = None, password: str = None, transport: str = "tcp", duration_seconds: float = 3.0, timeout_seconds: float = 15.0, relaxed: bool = False):
+    if username and password:
+        rtsp_url = with_basic_auth(rtsp_url, username, password)
+
+    if relaxed:
+        probe_flags = ["-analyzeduration", "3000000", "-probesize", "1048576"]
+    else:
+        probe_flags = ["-analyzeduration", "0", "-probesize", "32768", "-fflags", "nobuffer"]
+
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-nostdin",
+        "-y",
+        "-rtsp_transport",
+        transport,
+        *probe_flags,
         "-i",
         rtsp_url,
         "-t",
@@ -272,6 +304,13 @@ def main():
         else:
             output = Path("./screenshots/frame.jpg")
         output.parent.mkdir(parents=True, exist_ok=True)
+        direct_frame_command = build_ffmpeg_direct_frame_command(
+            url,
+            str(output),
+            username=username,
+            password=password,
+            transport=args.transport,
+        )
         tmp_clip = output.with_suffix(".tmp.ts")
         if tmp_clip.exists():
             tmp_clip.unlink()
@@ -283,6 +322,17 @@ def main():
             transport=args.transport,
             duration_seconds=args.clip_seconds,
             timeout_seconds=args.connect_timeout_seconds,
+            relaxed=False,
+        )
+        clip_command_fallback = build_ffmpeg_clip_command(
+            url,
+            str(tmp_clip),
+            username=username,
+            password=password,
+            transport=args.transport,
+            duration_seconds=args.clip_seconds,
+            timeout_seconds=args.connect_timeout_seconds,
+            relaxed=True,
         )
         frame_command = build_ffmpeg_extract_frame_command(
             str(tmp_clip),
@@ -301,16 +351,31 @@ def main():
         print("Starting stream playback...")
 
     if mode == "frame":
+        print("direct frame:", " ".join(redacted_command(direct_frame_command)))
         print("clip:", " ".join(redacted_command(clip_command)))
+        print("clip fallback:", " ".join(redacted_command(clip_command_fallback)))
         print("frame:", " ".join(redacted_command(frame_command)))
     else:
         print(" ".join(redacted_command(command)))
     try:
         if mode == "frame":
+            direct_frame_timeout = max(6.0, args.connect_timeout_seconds + 4.0)
             clip_timeout = max(10.0, args.connect_timeout_seconds + args.clip_seconds + 10.0)
+            fallback_clip_timeout = max(20.0, args.connect_timeout_seconds + args.clip_seconds + 35.0)
             frame_timeout = 20.0
-            subprocess.run(clip_command, check=True, env=env, timeout=clip_timeout)
-            subprocess.run(frame_command, check=True, env=env, timeout=frame_timeout)
+            try:
+                subprocess.run(direct_frame_command, check=True, env=env, timeout=direct_frame_timeout)
+                print("Direct frame capture succeeded.")
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                print("Direct frame capture failed, trying short-clip extraction...")
+                try:
+                    subprocess.run(clip_command, check=True, env=env, timeout=clip_timeout)
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    if tmp_clip.exists():
+                        tmp_clip.unlink()
+                    print("Fast clip capture failed, retrying with tolerant probe settings...")
+                    subprocess.run(clip_command_fallback, check=True, env=env, timeout=fallback_clip_timeout)
+                subprocess.run(frame_command, check=True, env=env, timeout=frame_timeout)
             if tmp_clip.exists():
                 tmp_clip.unlink()
         else:
