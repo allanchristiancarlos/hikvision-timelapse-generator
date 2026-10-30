@@ -21,6 +21,8 @@ def parse_args():
     parser.add_argument("--host", help="NVR IP or domain, for example 192.168.1.27")
     parser.add_argument("--date", help="Recording date in YYYY-MM-DD")
     parser.add_argument("--time", help="Recording time in HH:MM or HH:MM:SS")
+    parser.add_argument("--interval-hours", type=float, help="Batch mode: capture one frame every N hours for the provided --date")
+    parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between batch requests to avoid overloading NVR")
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
     parser.add_argument("--clip-seconds", type=float, default=1.0, help="How many seconds to download before extracting a frame")
@@ -226,6 +228,102 @@ def build_rtsp_url_from_time(host: str, track: int, start_dt: datetime, window_s
     return f"rtsp://{host}/Streaming/tracks/{track}/?starttime={start_str}&endtime={end_str}"
 
 
+def build_capture_times_for_date(target_date: datetime, interval_hours: float):
+    if interval_hours <= 0:
+        raise ValueError("--interval-hours must be greater than 0.")
+
+    start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0)
+    end = start + timedelta(days=1)
+    step = timedelta(seconds=max(1, int(interval_hours * 3600)))
+
+    times = []
+    current = start
+    while current < end:
+        times.append(current)
+        current += step
+    return times
+
+
+def run_frame_capture(url, output, username, password, args, env):
+    tmp_clip = output.with_suffix(".tmp.ts")
+    if tmp_clip.exists():
+        tmp_clip.unlink()
+
+    clip_command = build_ffmpeg_clip_command(
+        url,
+        str(tmp_clip),
+        username=username,
+        password=password,
+        transport=args.transport,
+        duration_seconds=args.clip_seconds,
+        timeout_seconds=args.connect_timeout_seconds,
+        relaxed=False,
+    )
+    clip_command_fallback = build_ffmpeg_clip_command(
+        url,
+        str(tmp_clip),
+        username=username,
+        password=password,
+        transport=args.transport,
+        duration_seconds=args.clip_seconds,
+        timeout_seconds=args.connect_timeout_seconds,
+        relaxed=True,
+    )
+
+    effective_frame_offset = args.frame_offset_seconds
+    min_safe_clip = max(0.1, args.clip_seconds)
+    if effective_frame_offset >= min_safe_clip:
+        print(f"[timing] frame offset {effective_frame_offset:.2f}s exceeds clip length {args.clip_seconds:.2f}s, using 0.0s")
+        effective_frame_offset = 0.0
+
+    frame_command = build_ffmpeg_extract_frame_command(
+        str(tmp_clip),
+        str(output),
+        frame_offset_seconds=effective_frame_offset,
+    )
+
+    print("clip:", " ".join(redacted_command(clip_command)))
+    print("clip fallback:", " ".join(redacted_command(clip_command_fallback)))
+    print("frame:", " ".join(redacted_command(frame_command)))
+
+    clip_timeout = max(4.0, args.connect_timeout_seconds + args.clip_seconds - 1.0)
+    fallback_clip_timeout = max(10.0, args.connect_timeout_seconds + args.clip_seconds + 4.0)
+    frame_timeout = 8.0
+    print(f"[timing] configured timeouts -> clip: {clip_timeout:.1f}s, fallback clip: {fallback_clip_timeout:.1f}s, frame extract: {frame_timeout:.1f}s")
+
+    try:
+        try:
+            timed_subprocess_run(
+                clip_command,
+                check=True,
+                env=env,
+                timeout=clip_timeout,
+                label="fast clip download",
+            )
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            if tmp_clip.exists():
+                tmp_clip.unlink()
+            print("Fast clip capture failed, retrying with tolerant probe settings...")
+            timed_subprocess_run(
+                clip_command_fallback,
+                check=True,
+                env=env,
+                timeout=fallback_clip_timeout,
+                label="fallback clip download",
+            )
+
+        timed_subprocess_run(
+            frame_command,
+            check=True,
+            env=env,
+            timeout=frame_timeout,
+            label="frame extraction",
+        )
+    finally:
+        if tmp_clip.exists():
+            tmp_clip.unlink()
+
+
 def main():
     args = parse_args()
 
@@ -237,14 +335,24 @@ def main():
         print("ffplay is not installed or not in PATH. Install ffmpeg to get ffplay.", file=sys.stderr)
         return 2
 
+    batch_mode = args.interval_hours is not None
     try:
-        if args.url:
+        if batch_mode:
+            if not args.date:
+                raise ValueError("--date is required when using --interval-hours.")
+            day_dt = datetime.strptime(args.date, "%Y-%m-%d")
+            capture_times = build_capture_times_for_date(day_dt, args.interval_hours)
+            url = None
+            capture_dt = None
+        elif args.url:
             # Accept URLs copied from HTML where query delimiters are encoded as &amp;.
             url = html.unescape(args.url.strip())
             capture_dt = None
+            capture_times = None
         else:
             capture_dt = parse_datetime_inputs(args.date, args.time)
             url = build_rtsp_url_from_time(args.host, args.track, capture_dt, args.window_seconds)
+            capture_times = None
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -283,48 +391,18 @@ def main():
         )
         print(f"Recording stream to {output}...")
     elif mode == "frame":
-        if args.output:
-            output = Path(args.output)
-        elif capture_dt:
-            output = Path("./screenshots") / f"frame_{capture_dt.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
+        if batch_mode:
+            output = None
+            print(f"Batch frame mode: {len(capture_times)} captures for {args.date} at {args.interval_hours} hour interval(s).")
         else:
-            output = Path("./screenshots/frame.jpg")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        tmp_clip = output.with_suffix(".tmp.ts")
-        if tmp_clip.exists():
-            tmp_clip.unlink()
-        clip_command = build_ffmpeg_clip_command(
-            url,
-            str(tmp_clip),
-            username=username,
-            password=password,
-            transport=args.transport,
-            duration_seconds=args.clip_seconds,
-            timeout_seconds=args.connect_timeout_seconds,
-            relaxed=False,
-        )
-        clip_command_fallback = build_ffmpeg_clip_command(
-            url,
-            str(tmp_clip),
-            username=username,
-            password=password,
-            transport=args.transport,
-            duration_seconds=args.clip_seconds,
-            timeout_seconds=args.connect_timeout_seconds,
-            relaxed=True,
-        )
-        effective_frame_offset = args.frame_offset_seconds
-        min_safe_clip = max(0.1, args.clip_seconds)
-        if effective_frame_offset >= min_safe_clip:
-            print(f"[timing] frame offset {effective_frame_offset:.2f}s exceeds clip length {args.clip_seconds:.2f}s, using 0.0s")
-            effective_frame_offset = 0.0
-
-        frame_command = build_ffmpeg_extract_frame_command(
-            str(tmp_clip),
-            str(output),
-            frame_offset_seconds=effective_frame_offset,
-        )
-        print(f"Downloading a short clip then extracting one frame to {output}...")
+            if args.output:
+                output = Path(args.output)
+            elif capture_dt:
+                output = Path("./screenshots") / f"frame_{capture_dt.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
+            else:
+                output = Path("./screenshots/frame.jpg")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            print(f"Downloading a short clip then extracting one frame to {output}...")
     else:
         command = build_ffplay_command(
             url,
@@ -335,48 +413,37 @@ def main():
         )
         print("Starting stream playback...")
 
-    if mode == "frame":
-        print("clip:", " ".join(redacted_command(clip_command)))
-        print("clip fallback:", " ".join(redacted_command(clip_command_fallback)))
-        print("frame:", " ".join(redacted_command(frame_command)))
-    else:
+    if mode != "frame":
         print(" ".join(redacted_command(command)))
     overall_started = time.perf_counter()
     try:
         if mode == "frame":
-            # Keep fast path truly fast. If this fails, fallback usually succeeds quickly.
-            clip_timeout = max(4.0, args.connect_timeout_seconds + args.clip_seconds - 1.0)
-            fallback_clip_timeout = max(10.0, args.connect_timeout_seconds + args.clip_seconds + 4.0)
-            frame_timeout = 8.0
-            print(f"[timing] configured timeouts -> clip: {clip_timeout:.1f}s, fallback clip: {fallback_clip_timeout:.1f}s, frame extract: {frame_timeout:.1f}s")
-            try:
-                timed_subprocess_run(
-                    clip_command,
-                    check=True,
-                    env=env,
-                    timeout=clip_timeout,
-                    label="fast clip download",
-                )
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                if tmp_clip.exists():
-                    tmp_clip.unlink()
-                print("Fast clip capture failed, retrying with tolerant probe settings...")
-                timed_subprocess_run(
-                    clip_command_fallback,
-                    check=True,
-                    env=env,
-                    timeout=fallback_clip_timeout,
-                    label="fallback clip download",
-                )
-            timed_subprocess_run(
-                frame_command,
-                check=True,
-                env=env,
-                timeout=frame_timeout,
-                label="frame extraction",
-            )
-            if tmp_clip.exists():
-                tmp_clip.unlink()
+            if batch_mode:
+                success = 0
+                failures = 0
+                for index, ts in enumerate(capture_times, start=1):
+                    ts_output = Path("./screenshots") / f"frame_{ts.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
+                    ts_output.parent.mkdir(parents=True, exist_ok=True)
+                    ts_url = build_rtsp_url_from_time(args.host, args.track, ts, args.window_seconds)
+
+                    print(f"[{index}/{len(capture_times)}] Capturing {ts.strftime('%Y-%m-%d %H:%M:%S')} -> {ts_output}")
+                    try:
+                        run_frame_capture(ts_url, ts_output, username, password, args, env)
+                        print(f"[{index}/{len(capture_times)}] Saved {ts_output}")
+                        success += 1
+                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                        print(f"[{index}/{len(capture_times)}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                        failures += 1
+
+                    if index < len(capture_times) and args.delay_seconds > 0:
+                        print(f"[timing] sleeping {args.delay_seconds:.2f}s before next interval")
+                        time.sleep(args.delay_seconds)
+
+                print(f"Batch complete: {success} succeeded, {failures} failed")
+                if failures > 0:
+                    return 5
+            else:
+                run_frame_capture(url, output, username, password, args, env)
         else:
             timed_subprocess_run(
                 command,
@@ -401,7 +468,7 @@ def main():
 
     if mode == "record":
         print(f"Recording complete: {args.output}")
-    if mode == "frame":
+    if mode == "frame" and not batch_mode:
         print(f"Frame captured: {output}")
 
     overall_elapsed = time.perf_counter() - overall_started
