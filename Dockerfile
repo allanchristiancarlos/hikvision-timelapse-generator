@@ -15,5 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENTRYPOINT ["python", "play_rtsp.py"]
+ENTRYPOINT ["python", "daily_pipeline.py"]
 CMD ["--help"]
