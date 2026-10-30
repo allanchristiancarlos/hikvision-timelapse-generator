@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
     parser.add_argument("--clip-seconds", type=float, default=1.0, help="How many seconds to download before extracting a frame")
-    parser.add_argument("--frame-offset-seconds", type=float, default=1.0, help="Offset inside the downloaded clip for the output frame")
+    parser.add_argument("--frame-offset-seconds", type=float, default=0.0, help="Offset inside the downloaded clip for the output frame")
     parser.add_argument("--connect-timeout-seconds", type=float, default=5.0, help="RTSP connect/read timeout in seconds")
     parser.add_argument("--username", help="RTSP basic auth username")
     parser.add_argument("--password", help="RTSP basic auth password")
@@ -144,6 +144,8 @@ def build_ffmpeg_extract_frame_command(input_video: str, output_image: str, fram
         "1",
         "-q:v",
         "2",
+        "-update",
+        "1",
         output_image,
     ]
     return command
@@ -311,10 +313,16 @@ def main():
             timeout_seconds=args.connect_timeout_seconds,
             relaxed=True,
         )
+        effective_frame_offset = args.frame_offset_seconds
+        min_safe_clip = max(0.1, args.clip_seconds)
+        if effective_frame_offset >= min_safe_clip:
+            print(f"[timing] frame offset {effective_frame_offset:.2f}s exceeds clip length {args.clip_seconds:.2f}s, using 0.0s")
+            effective_frame_offset = 0.0
+
         frame_command = build_ffmpeg_extract_frame_command(
             str(tmp_clip),
             str(output),
-            frame_offset_seconds=args.frame_offset_seconds,
+            frame_offset_seconds=effective_frame_offset,
         )
         print(f"Downloading a short clip then extracting one frame to {output}...")
     else:
@@ -336,9 +344,10 @@ def main():
     overall_started = time.perf_counter()
     try:
         if mode == "frame":
-            clip_timeout = max(10.0, args.connect_timeout_seconds + args.clip_seconds + 10.0)
-            fallback_clip_timeout = max(20.0, args.connect_timeout_seconds + args.clip_seconds + 35.0)
-            frame_timeout = 20.0
+            # Keep fast path truly fast. If this fails, fallback usually succeeds quickly.
+            clip_timeout = max(4.0, args.connect_timeout_seconds + args.clip_seconds - 1.0)
+            fallback_clip_timeout = max(10.0, args.connect_timeout_seconds + args.clip_seconds + 4.0)
+            frame_timeout = 8.0
             print(f"[timing] configured timeouts -> clip: {clip_timeout:.1f}s, fallback clip: {fallback_clip_timeout:.1f}s, frame extract: {frame_timeout:.1f}s")
             try:
                 timed_subprocess_run(
