@@ -22,6 +22,7 @@ def parse_args():
     parser.add_argument("--date", help="Recording date in YYYY-MM-DD")
     parser.add_argument("--time", help="Recording time in HH:MM or HH:MM:SS")
     parser.add_argument("--interval-hours", type=float, help="Batch mode: capture one frame every N hours for the provided --date")
+    parser.add_argument("--frames-per-day", type=int, help="Batch mode: capture exactly this many evenly spaced frames across the provided --date")
     parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between batch requests to avoid overloading NVR")
     parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
     parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
@@ -244,6 +245,18 @@ def build_capture_times_for_date(target_date: datetime, interval_hours: float):
     return times
 
 
+def build_capture_times_for_count(target_date: datetime, frames_per_day: int):
+    if frames_per_day <= 0:
+        raise ValueError("--frames-per-day must be greater than 0.")
+
+    start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0)
+    step_seconds = 86400.0 / float(frames_per_day)
+    times = []
+    for i in range(frames_per_day):
+        times.append(start + timedelta(seconds=i * step_seconds))
+    return times
+
+
 def run_frame_capture(url, output, username, password, args, env):
     tmp_clip = output.with_suffix(".tmp.ts")
     if tmp_clip.exists():
@@ -327,6 +340,10 @@ def run_frame_capture(url, output, username, password, args, env):
 def main():
     args = parse_args()
 
+    if args.interval_hours is not None and args.frames_per_day is not None:
+        print("Use either --interval-hours or --frames-per-day, not both.", file=sys.stderr)
+        return 1
+
     if not shutil.which("ffmpeg"):
         print("ffmpeg is not installed or not in PATH.", file=sys.stderr)
         return 2
@@ -335,13 +352,16 @@ def main():
         print("ffplay is not installed or not in PATH. Install ffmpeg to get ffplay.", file=sys.stderr)
         return 2
 
-    batch_mode = args.interval_hours is not None
+    batch_mode = args.interval_hours is not None or args.frames_per_day is not None
     try:
         if batch_mode:
             if not args.date:
-                raise ValueError("--date is required when using --interval-hours.")
+                raise ValueError("--date is required when using --interval-hours or --frames-per-day.")
             day_dt = datetime.strptime(args.date, "%Y-%m-%d")
-            capture_times = build_capture_times_for_date(day_dt, args.interval_hours)
+            if args.frames_per_day is not None:
+                capture_times = build_capture_times_for_count(day_dt, args.frames_per_day)
+            else:
+                capture_times = build_capture_times_for_date(day_dt, args.interval_hours)
             url = None
             capture_dt = None
         elif args.url:
@@ -393,7 +413,10 @@ def main():
     elif mode == "frame":
         if batch_mode:
             output = None
-            print(f"Batch frame mode: {len(capture_times)} captures for {args.date} at {args.interval_hours} hour interval(s).")
+            if args.frames_per_day is not None:
+                print(f"Batch frame mode: {len(capture_times)} evenly spaced captures for {args.date}.")
+            else:
+                print(f"Batch frame mode: {len(capture_times)} captures for {args.date} at {args.interval_hours} hour interval(s).")
         else:
             if args.output:
                 output = Path(args.output)
@@ -457,13 +480,9 @@ def main():
         return 2
     except subprocess.TimeoutExpired:
         print("ffmpeg timed out before finishing. Try a shorter clip or a larger --window-seconds.", file=sys.stderr)
-        if mode == "frame" and tmp_clip.exists():
-            tmp_clip.unlink()
         return 4
     except subprocess.CalledProcessError as exc:
         print(f"ffmpeg/ffplay exited with return code {exc.returncode}.", file=sys.stderr)
-        if mode == "frame" and tmp_clip.exists():
-            tmp_clip.unlink()
         return exc.returncode if isinstance(exc.returncode, int) else 1
 
     if mode == "record":
