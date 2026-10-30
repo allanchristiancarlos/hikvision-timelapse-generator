@@ -526,6 +526,7 @@ def main():
                 all_items = []
                 skipped_existing = 0
                 skipped_failed = 0
+                retried_failed_today = 0
                 for ts in capture_times:
                     output_path = Path("./screenshots") / f"frame_{ts.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
                     key = ts_key(ts)
@@ -540,8 +541,12 @@ def main():
                         continue
 
                     if key in state["failed"]:
-                        skipped_failed += 1
-                        continue
+                        if ts.date() == today:
+                            retried_failed_today += 1
+                            # Allow same-day retries for transient errors.
+                        else:
+                            skipped_failed += 1
+                            continue
 
                     all_items.append((ts, output_path, key))
 
@@ -549,6 +554,8 @@ def main():
                     print(f"Skipping {skipped_existing} already extracted frame(s) found on disk.")
                 if skipped_failed > 0:
                     print(f"Skipping {skipped_failed} previously failed frame(s) from state file.")
+                if retried_failed_today > 0:
+                    print(f"Retrying {retried_failed_today} previously failed frame(s) dated today.")
 
                 save_state(state_path, state)
 
