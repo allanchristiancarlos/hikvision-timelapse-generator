@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTAINER_NAME="${HOUSE_SCREENSHOTS_CONTAINER_NAME:-house-screenshots-daemon}"
+CONTAINER_NAME="${HIKVISION_TIMELAPSE_GENERATOR_CONTAINER_NAME:-hikvision-timelapse-generator-daemon}"
 
 if ! docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
   echo "Container not found: $CONTAINER_NAME"

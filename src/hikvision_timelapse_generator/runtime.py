@@ -144,23 +144,25 @@ class DynamicStreamHandler(logging.StreamHandler):
 
 
 def configure_logging(level=logging.INFO, *, force_color=True):
-    logger = logging.getLogger("house_screenshots")
-    logger.setLevel(level)
-    logger.propagate = False
-    logger.handlers.clear()
-
     handler = DynamicStreamHandler("stdout")
     handler.setFormatter(ColorFormatter(
         "%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         force_color=force_color,
     ))
-    logger.addHandler(handler)
-    return logger
+
+    for logger_name in ("hikvision_timelapse_generator", "house_screenshots"):
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(level)
+        logger.propagate = False
+        logger.handlers.clear()
+        logger.addHandler(handler)
+
+    return logging.getLogger("hikvision_timelapse_generator")
 
 
 def get_logger():
-    return logging.getLogger("house_screenshots")
+    return logging.getLogger("hikvision_timelapse_generator")
 
 
 def timed_subprocess_run(command, *, env, timeout, label, check=True):

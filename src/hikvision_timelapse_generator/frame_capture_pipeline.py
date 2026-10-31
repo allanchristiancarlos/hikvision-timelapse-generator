@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import time
-from logging import getLogger
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,7 +12,7 @@ from urllib.parse import quote, urlparse, urlunparse
 
 from .runtime import get_logger, redacted_command, timed_subprocess_run
 
-logger = getLogger("house_screenshots")
+logger = get_logger()
 
 
 @dataclass

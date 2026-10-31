@@ -1,14 +1,15 @@
+import logging
 import sys
 from datetime import datetime
 
-from house_screenshots.frame_capture_pipeline import (
+from hikvision_timelapse_generator.frame_capture_pipeline import (
     build_capture_times_for_count,
     build_capture_times_for_date,
     build_ffmpeg_clip_command,
     build_rtsp_url_from_time,
 )
-from house_screenshots.pipeline_daemon import BackgroundPipelineApp, BackgroundPipelineConfig, build_date_range
-from house_screenshots.runtime import configure_logging, redacted_command
+from hikvision_timelapse_generator.pipeline_daemon import BackgroundPipelineApp, BackgroundPipelineConfig, build_date_range
+from hikvision_timelapse_generator.runtime import configure_logging, redacted_command
 
 
 def test_build_capture_times_for_date_uses_interval_hours():
@@ -107,7 +108,7 @@ def test_background_pipeline_logs_redact_passwords(capsys, monkeypatch):
     def fake_run(command, **kwargs):
         return None
 
-    monkeypatch.setattr("house_screenshots.pipeline_daemon.subprocess.run", fake_run)
+    monkeypatch.setattr("hikvision_timelapse_generator.pipeline_daemon.subprocess.run", fake_run)
 
     app._run_command([sys.executable, "-m", "echo", "--password", "super-secret"], {"PATH": "/usr/bin"})
 
@@ -127,3 +128,11 @@ def test_configure_logging_emits_colorized_sections(capsys):
     assert "WARNING" in captured.out
     assert "ERROR" in captured.out
     assert "\x1b[" in captured.out
+
+
+def test_pipeline_logger_uses_configured_handler(capsys):
+    configure_logging(force_color=False)
+    logging.getLogger("house_screenshots").info("Frame 01/12 started")
+
+    captured = capsys.readouterr()
+    assert "Frame 01/12 started" in captured.out

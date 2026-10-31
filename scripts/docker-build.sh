@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE_NAME="${HOUSE_SCREENSHOTS_IMAGE:-house-screenshots}"
+IMAGE_NAME="${HIKVISION_TIMELAPSE_GENERATOR_IMAGE:-hikvision-timelapse-generator}"
 
 cd "$ROOT_DIR"
 

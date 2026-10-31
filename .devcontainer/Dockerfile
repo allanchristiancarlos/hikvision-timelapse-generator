@@ -7,4 +7,4 @@ RUN find /etc/apt/sources.list.d -maxdepth 1 -type f -iname '*yarn*' -delete \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspaces/house-screenshots
+WORKDIR /workspaces/hikvision-timelapse-generator

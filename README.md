@@ -1,14 +1,14 @@
-# House Screenshots
+# Hikvision Timelapse Generator
 
-A modular terminal app for extracting still screenshots from a Hikvision NVR and rendering incremental timelapse videos.
+A modular terminal app for extracting frames from a Hikvision NVR and rendering incremental timelapse videos.
 
 ## Project structure
 
-- `src/house_screenshots/frame_capture_pipeline.py`: frame-capture pipeline module.
-- `src/house_screenshots/timelapse_renderer.py`: incremental timelapse rendering module.
-- `src/house_screenshots/pipeline_daemon.py`: background application service.
-- `src/house_screenshots/capture_cli.py`: capture/render CLI composition root.
-- `src/house_screenshots/daemon_cli.py`: scheduler CLI composition root.
+- `src/hikvision_timelapse_generator/frame_capture_pipeline.py`: frame-capture pipeline module.
+- `src/hikvision_timelapse_generator/timelapse_renderer.py`: incremental timelapse rendering module.
+- `src/hikvision_timelapse_generator/pipeline_daemon.py`: background application service.
+- `src/hikvision_timelapse_generator/capture_cli.py`: capture/render CLI composition root.
+- `src/hikvision_timelapse_generator/daemon_cli.py`: scheduler CLI composition root.
 - `src/capture_and_render.py`: user-facing extraction/render entrypoint.
 - `src/run_capture_daemon.py`: user-facing background scheduler entrypoint.
 
@@ -64,9 +64,9 @@ Stop and remove daemon container:
 
 Optional environment variables:
 
-- `HOUSE_SCREENSHOTS_IMAGE` to override image name (default: `house-screenshots`)
-- `HOUSE_SCREENSHOTS_ENV_FILE` to use a different env file (default: `.env`)
-- `HOUSE_SCREENSHOTS_CONTAINER_NAME` to rename daemon container (default: `house-screenshots-daemon`)
+- `HIKVISION_TIMELAPSE_GENERATOR_IMAGE` to override image name (default: `hikvision-timelapse-generator`)
+- `HIKVISION_TIMELAPSE_GENERATOR_ENV_FILE` to use a different env file (default: `.env`)
+- `HIKVISION_TIMELAPSE_GENERATOR_CONTAINER_NAME` to rename daemon container (default: `hikvision-timelapse-generator-daemon`)
 
 ## Environment setup (recommended)
 

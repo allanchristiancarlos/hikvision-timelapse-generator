@@ -2,3 +2,11 @@
 **/.DS_Store
 .env
 .env.local
+
+# Python virtual environment and local caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/

@@ -1,5 +1,5 @@
 {
-  "name": "house-screenshots",
+  "name": "hikvision-timelapse-generator",
   "build": {
     "dockerfile": "Dockerfile"
   },

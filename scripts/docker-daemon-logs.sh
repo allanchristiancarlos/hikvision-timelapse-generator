@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTAINER_NAME="${HOUSE_SCREENSHOTS_CONTAINER_NAME:-house-screenshots-daemon}"
+CONTAINER_NAME="${HIKVISION_TIMELAPSE_GENERATOR_CONTAINER_NAME:-hikvision-timelapse-generator-daemon}"
 
 exec docker logs -f "$CONTAINER_NAME"

@@ -1,4 +1,4 @@
-"""House screenshots package."""
+"""Hikvision timelapse generator package."""
 
 __all__ = [
     "capture_cli",

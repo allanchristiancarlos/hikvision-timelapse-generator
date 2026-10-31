@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from house_screenshots.daemon_cli import main
+from hikvision_timelapse_generator.daemon_cli import main
 
 
 if __name__ == "__main__":

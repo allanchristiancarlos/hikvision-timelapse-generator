@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE_NAME="${HOUSE_SCREENSHOTS_IMAGE:-house-screenshots}"
-ENV_FILE="${HOUSE_SCREENSHOTS_ENV_FILE:-$ROOT_DIR/.env}"
-CONTAINER_NAME="${HOUSE_SCREENSHOTS_CONTAINER_NAME:-house-screenshots-daemon}"
+IMAGE_NAME="${HIKVISION_TIMELAPSE_GENERATOR_IMAGE:-hikvision-timelapse-generator}"
+ENV_FILE="${HIKVISION_TIMELAPSE_GENERATOR_ENV_FILE:-$ROOT_DIR/.env}"
+CONTAINER_NAME="${HIKVISION_TIMELAPSE_GENERATOR_CONTAINER_NAME:-hikvision-timelapse-generator-daemon}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Env file not found: $ENV_FILE" >&2
