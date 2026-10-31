@@ -37,7 +37,7 @@ Release a new semver version and publish the Docker image + Git tags:
 ./scripts/release.sh 1.2.3
 ```
 
-The release script creates Git tags such as `v1.2.3`, `v1.2`, and `v1`, then builds and pushes Docker tags such as `1.2.3`, `1.2`, `1`, and `latest` for `docker.verion.dev/admin-allan/hikvision-timelapse-generator`. Use `DOCKER_IMAGE` to override the registry/repository and `--dry-run` to preview the release without publishing anything.
+The release script creates Git tags such as `v1.2.3`, `v1.2`, and `v1`, then builds and pushes Docker tags such as `1.2.3`, `1.2`, `1`, and `latest` for `192.168.1.145:30142/admin-allan/hikvision-timelapse-generator`. It is safe to rerun after a partial failure because it skips Git and Docker tags that are already published. Use `DOCKER_IMAGE` to override the registry/repository and `--dry-run` to preview the release without publishing anything.
 
 Extract frames (passes through any src/capture_and_render.py args):
 
