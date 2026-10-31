@@ -6,13 +6,14 @@ cd "$ROOT_DIR"
 
 IMAGE_REPO="${DOCKER_IMAGE:-192.168.1.145:30142/admin-allan/hikvision-timelapse-generator}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
+RELEASE_BRANCH="main"
 DRY_RUN="false"
 
 usage() {
   cat <<'EOF'
 Usage: ./scripts/release.sh [major|minor|patch|x.y.z] [--dry-run]
 
-Release a new application version with SemVer, Docker image publishing, and Git tags.
+Release a new application version with SemVer, Docker image publishing, and Git metadata.
 
 Examples:
   ./scripts/release.sh
@@ -24,6 +25,9 @@ Examples:
 
 Notes:
   - Defaults to a patch release when no bump is supplied.
+  - Releases are allowed only from the main branch.
+  - If you are on another branch, switch to main and merge your changes first.
+  - Pushes the current branch (if any local commits exist) and release tags to the Git remote.
   - Creates Git tags like v1.2.3, v1.2, and v1.
   - Publishes Docker tags like 1.2.3, 1.2, 1, and latest.
   - The image repository can be overridden with DOCKER_IMAGE.
@@ -60,6 +64,14 @@ fi
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "This script must be run from inside a git repository." >&2
+  exit 1
+fi
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "$RELEASE_BRANCH" ]]; then
+  echo "Release blocked: current branch is '${CURRENT_BRANCH}'." >&2
+  echo "Releases are only allowed from '${RELEASE_BRANCH}'." >&2
+  echo "Switch to '${RELEASE_BRANCH}', merge your changes, then run release again." >&2
   exit 1
 fi
 
@@ -143,6 +155,23 @@ push_tag() {
   echo "Pushed git tag: $tag"
 }
 
+push_branch_changes() {
+  local branch="$1"
+
+  if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+    echo "Detached HEAD detected; skipping branch push."
+    return 0
+  fi
+
+  if git rev-parse --verify "${GIT_REMOTE}/${branch}" >/dev/null 2>&1; then
+    git push "$GIT_REMOTE" "$branch"
+  else
+    git push --set-upstream "$GIT_REMOTE" "$branch"
+  fi
+
+  echo "Pushed branch: ${branch}"
+}
+
 docker_tag_exists() {
   local reference="$1"
   docker manifest inspect "$reference" >/dev/null 2>&1
@@ -150,17 +179,19 @@ docker_tag_exists() {
 
 if [[ "$DRY_RUN" == "true" ]]; then
   print_release_summary
-  echo "Dry run only; no files changed, no Docker image pushed, and no tags created."
+  echo "Dry run only; no files changed, no Docker image pushed, and no git refs pushed."
   exit 0
 fi
 
 print_release_summary
 
 # Ensure the branch is up to date before release.
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [[ -n "$CURRENT_BRANCH" && "$CURRENT_BRANCH" != "HEAD" ]]; then
   echo "Releasing from branch: $CURRENT_BRANCH"
 fi
+
+# Push branch changes before creating release tags.
+push_branch_changes "$CURRENT_BRANCH"
 
 # Create and push Git tags.
 ensure_git_tag "$GIT_TAG" "Release ${GIT_TAG}"
