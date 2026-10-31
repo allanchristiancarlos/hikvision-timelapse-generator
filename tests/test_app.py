@@ -1,3 +1,4 @@
+import sys
 from datetime import datetime
 
 from house_screenshots.frame_capture_pipeline import (
@@ -6,7 +7,8 @@ from house_screenshots.frame_capture_pipeline import (
     build_ffmpeg_clip_command,
     build_rtsp_url_from_time,
 )
-from house_screenshots.pipeline_daemon import build_date_range
+from house_screenshots.pipeline_daemon import BackgroundPipelineApp, BackgroundPipelineConfig, build_date_range
+from house_screenshots.runtime import redacted_command
 
 
 def test_build_capture_times_for_date_uses_interval_hours():
@@ -54,3 +56,61 @@ def test_build_ffmpeg_clip_command_includes_transport_and_target_file():
     assert "-t" in command
     assert "2.5" in command
     assert "/tmp/clip.ts" in command
+
+
+def test_redacted_command_masks_password_and_rtsp_credentials():
+    command = [
+        "ffmpeg",
+        "-i",
+        "rtsp://alice:super-secret@example.local/stream?token=abc",
+        "-f",
+        "mpegts",
+        "/tmp/clip.ts",
+        "--password",
+        "super-secret",
+    ]
+
+    redacted = redacted_command(command)
+    redacted_rendered = " ".join(redacted)
+
+    assert "super-secret" not in redacted_rendered
+    assert "alice" not in redacted_rendered
+    assert "***" in redacted_rendered
+
+
+def test_background_pipeline_logs_redact_passwords(capsys, monkeypatch):
+    app = BackgroundPipelineApp(
+        BackgroundPipelineConfig(
+            host="example.local",
+            username="alice",
+            password="super-secret",
+            start_date="2026-10-01",
+            run_at="00:10",
+            every_minutes=None,
+            frames_per_day=48,
+            track=801,
+            window_seconds=4,
+            clip_seconds=1.0,
+            connect_timeout_seconds=5.0,
+            delay_seconds=0.0,
+            parallel_jobs=1,
+            transport="tcp",
+            frames_dir="./screenshots",
+            video_output="./screenshots/timelapse.mp4",
+            video_fps=24,
+            state_file="./screenshots/.extract_state.json",
+            scheduler_state="./screenshots/.daily_pipeline_state.json",
+            capture_script="./src/capture_and_render.py",
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        return None
+
+    monkeypatch.setattr("house_screenshots.pipeline_daemon.subprocess.run", fake_run)
+
+    app._run_command([sys.executable, "-m", "echo", "--password", "super-secret"], {"PATH": "/usr/bin"})
+
+    captured = capsys.readouterr()
+    assert "super-secret" not in captured.out
+    assert "***" in captured.out

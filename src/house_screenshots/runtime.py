@@ -78,16 +78,33 @@ def has_display() -> bool:
 
 def redacted_command(command):
     redacted = []
-    for token in command:
-        if token.startswith("rtsp://") and "@" in token:
-            parsed = urlparse(token)
-            host = parsed.hostname or ""
-            if parsed.port:
-                host = f"{host}:{parsed.port}"
-            safe_url = urlunparse(parsed._replace(netloc=f"***:***@{host}"))
-            redacted.append(safe_url)
-        else:
+    index = 0
+    while index < len(command):
+        token = command[index]
+        lower_token = token.lower()
+
+        if lower_token in {"--password", "--pass", "--username", "--user", "-p", "-u", "--rtsp-password", "--rtsp-user"}:
             redacted.append(token)
+            if index + 1 < len(command):
+                redacted.append("***")
+                index += 2
+                continue
+            index += 1
+            continue
+
+        if "://" in token and "@" in token:
+            parsed = urlparse(token)
+            if parsed.hostname:
+                host = parsed.hostname
+                if parsed.port:
+                    host = f"{host}:{parsed.port}"
+                safe_url = urlunparse(parsed._replace(netloc=f"***:***@{host}"))
+                redacted.append(safe_url)
+                index += 1
+                continue
+
+        redacted.append(token)
+        index += 1
     return redacted
 
 

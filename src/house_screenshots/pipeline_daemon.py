@@ -8,6 +8,8 @@ from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Optional
 
+from .runtime import redacted_command
+
 
 def log(msg: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -93,7 +95,7 @@ class BackgroundPipelineApp:
         self.config = config
 
     def _run_command(self, command, env):
-        log("Running: " + " ".join(command))
+        log("Running: " + " ".join(redacted_command(command)))
         subprocess.run(command, check=True, env=env)
 
     def run_pipeline(self, env):

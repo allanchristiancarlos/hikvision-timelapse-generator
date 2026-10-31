@@ -1,2 +1,2 @@
-requests>=2.31.0
-pytest>=8.0.0
+# No runtime Python dependencies are required for this project.
+# Keep test tooling in a separate dev environment instead of shipping it in production images.
