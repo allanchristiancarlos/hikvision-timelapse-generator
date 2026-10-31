@@ -1,14 +1,19 @@
+import base64
+import hashlib
 import json
+import mimetypes
 import os
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
-from .runtime import get_logger, redacted_command
+from .runtime import env_str, get_logger, redacted_command
 
 
 logger = get_logger()
@@ -68,6 +73,80 @@ def should_run_today(now: datetime, run_at: dt_time, last_successful_date):
     return last_successful_date != now.date().isoformat()
 
 
+def _as_bool(value) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_nextcloud_upload_url(base_url: str, username: str, remote_path: str, file_name: str) -> str:
+    cleaned_base = base_url.rstrip("/")
+    cleaned_remote = str(remote_path or "").strip().replace("\\", "/").strip("/")
+    cleaned_file_name = str(file_name).strip("/")
+
+    if cleaned_remote and cleaned_remote.endswith(cleaned_file_name):
+        remote_target = cleaned_remote
+    elif cleaned_remote:
+        remote_target = f"{cleaned_remote}/{cleaned_file_name}"
+    else:
+        remote_target = cleaned_file_name
+
+    return f"{cleaned_base}/remote.php/dav/files/{quote(username)}/{remote_target.lstrip('/')}"
+
+
+def is_nextcloud_upload_enabled():
+    configured_flag = env_str("NEXTCLOUD_UPLOAD_ENABLED")
+    if configured_flag is not None and configured_flag != "":
+        return _as_bool(configured_flag)
+    return bool(env_str("NEXTCLOUD_URL") and env_str("NEXTCLOUD_USERNAME") and env_str("NEXTCLOUD_PASSWORD"))
+
+
+def upload_video_to_nextcloud(file_path, *, base_url=None, username=None, password=None, remote_path=None):
+    video_path = Path(file_path)
+    base_url = base_url or env_str("NEXTCLOUD_URL")
+    username = username or env_str("NEXTCLOUD_USERNAME")
+    password = password or env_str("NEXTCLOUD_PASSWORD")
+    remote_path = remote_path if remote_path is not None else env_str("NEXTCLOUD_REMOTE_PATH")
+
+    if not base_url:
+        raise ValueError("NEXTCLOUD_URL is required for uploads")
+    if not username:
+        raise ValueError("NEXTCLOUD_USERNAME is required for uploads")
+    if not password:
+        raise ValueError("NEXTCLOUD_PASSWORD is required for uploads")
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video file not found for upload: {video_path}")
+
+    upload_url = build_nextcloud_upload_url(base_url, username, remote_path, video_path.name)
+    auth_header = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    content_type = mimetypes.guess_type(video_path.name)[0] or "application/octet-stream"
+
+    request = urllib.request.Request(upload_url, data=video_path.read_bytes(), method="PUT")
+    request.add_header("Content-Type", content_type)
+    request.add_header("Authorization", f"Basic {auth_header}")
+
+    try:
+        log(f"Uploading rendered video to Nextcloud: {upload_url}")
+        response = urllib.request.urlopen(request, timeout=30)
+        try:
+            status = getattr(response, "status", None)
+            if status is not None and status >= 400:
+                raise RuntimeError(f"Nextcloud upload failed with HTTP status {status}")
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+        return upload_url
+    except Exception as exc:
+        raise RuntimeError(f"Nextcloud upload failed for {video_path}: {exc}") from exc
+
+
 @dataclass
 class BackgroundPipelineConfig:
     host: str
@@ -99,6 +178,49 @@ class BackgroundPipelineApp:
     def _run_command(self, command, env):
         log("Running: " + " ".join(redacted_command(command)))
         subprocess.run(command, check=True, env=env)
+
+    def _upload_rendered_video_if_configured(self):
+        if not is_nextcloud_upload_enabled():
+            log("Nextcloud upload disabled; skipping upload step")
+            return
+
+        base_output = Path(self.config.video_output)
+        video_dir = base_output.parent
+        stem = base_output.stem
+        candidate_files = []
+        for path in sorted(video_dir.glob(f"{stem}*.mp4")):
+            name = path.name
+            if any(token in name for token in (".append_segment", ".existing", ".merged")):
+                continue
+            candidate_files.append(path)
+
+        if not candidate_files:
+            log(f"Rendered video not found, skipping Nextcloud upload: {base_output}")
+            return
+
+        scheduler_state_path = Path(self.config.scheduler_state)
+        state = load_json(scheduler_state_path)
+        hashes_by_file = state.setdefault("last_uploaded_video_hashes", {})
+        changed_files = []
+
+        for rendered_video in candidate_files:
+            current_digest = file_sha256(rendered_video)
+            last_digest = hashes_by_file.get(str(rendered_video.resolve()))
+            if last_digest != current_digest:
+                changed_files.append((rendered_video, current_digest))
+
+        if not changed_files:
+            log(f"Skipping Nextcloud upload; all rendered videos are unchanged: {[str(path) for path, _ in []]}")
+            return
+
+        for rendered_video, current_digest in changed_files:
+            upload_video_to_nextcloud(rendered_video)
+            hashes_by_file[str(rendered_video.resolve())] = current_digest
+            state["last_uploaded_video_sha256"] = current_digest
+            state["last_uploaded_video_name"] = rendered_video.name
+            state["last_uploaded_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        save_json(scheduler_state_path, state)
 
     def run_pipeline(self, env):
         args = self.config
@@ -161,6 +283,7 @@ class BackgroundPipelineApp:
 
         self._run_command(extract_cmd, env)
         self._run_command(render_cmd, env)
+        self._upload_rendered_video_if_configured()
 
     def run_once(self, env):
         self.run_pipeline(env)

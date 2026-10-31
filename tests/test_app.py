@@ -10,7 +10,12 @@ from hikvision_timelapse_generator.frame_capture_pipeline import (
     build_ffmpeg_clip_command,
     build_rtsp_url_from_time,
 )
-from hikvision_timelapse_generator.pipeline_daemon import BackgroundPipelineApp, BackgroundPipelineConfig, build_date_range
+from hikvision_timelapse_generator.pipeline_daemon import (
+    BackgroundPipelineApp,
+    BackgroundPipelineConfig,
+    build_date_range,
+    upload_video_to_nextcloud,
+)
 from hikvision_timelapse_generator.runtime import configure_logging, redacted_command
 
 
@@ -187,6 +192,92 @@ def test_pipeline_logger_uses_configured_handler(capsys):
 
     captured = capsys.readouterr()
     assert "Frame 01/12 started" in captured.out
+
+
+def test_nextcloud_upload_uses_env_configured_basic_auth(monkeypatch, tmp_path):
+    video_file = tmp_path / "timelapse.mp4"
+    video_file.write_bytes(b"video-bytes")
+
+    monkeypatch.setenv("NEXTCLOUD_UPLOAD_ENABLED", "true")
+    monkeypatch.setenv("NEXTCLOUD_URL", "http://192.168.1.145:30027")
+    monkeypatch.setenv("NEXTCLOUD_USERNAME", "nextcloud_admin")
+    monkeypatch.setenv("NEXTCLOUD_PASSWORD", "super-secret")
+    monkeypatch.setenv("NEXTCLOUD_REMOTE_PATH", "Projects/CarlosResidenceVlog")
+
+    seen = {}
+
+    class DummyResponse:
+        status = 201
+
+    def fake_urlopen(request, timeout=30):
+        seen["url"] = request.full_url
+        seen["method"] = request.get_method()
+        seen["auth"] = request.headers.get("Authorization")
+        seen["content_type"] = request.headers.get("Content-Type")
+        seen["body"] = request.data
+        return DummyResponse()
+
+    monkeypatch.setattr("hikvision_timelapse_generator.pipeline_daemon.urllib.request.urlopen", fake_urlopen)
+
+    result = upload_video_to_nextcloud(video_file)
+
+    assert result.endswith("/Projects/CarlosResidenceVlog/timelapse.mp4")
+    assert seen["method"] == "PUT"
+    assert seen["auth"].startswith("Basic ")
+    assert b"video-bytes" in seen["body"]
+    assert "super-secret" not in str(seen)
+
+
+def test_daemon_skips_nextcloud_upload_when_video_is_unchanged(tmp_path, monkeypatch):
+    scheduler_state = tmp_path / ".daily_pipeline_state.json"
+    video_file = tmp_path / "timelapse.mp4"
+    video_file.write_bytes(b"video-bytes")
+
+    app = BackgroundPipelineApp(
+        BackgroundPipelineConfig(
+            host="example.local",
+            username="alice",
+            password="super-secret",
+            start_date="2026-10-01",
+            run_at="00:10",
+            every_minutes=None,
+            frames_per_day=48,
+            track=801,
+            window_seconds=4,
+            clip_seconds=1.0,
+            connect_timeout_seconds=5.0,
+            delay_seconds=0.0,
+            parallel_jobs=1,
+            transport="tcp",
+            frames_dir="./screenshots",
+            video_output=str(video_file),
+            video_fps=24,
+            state_file="./screenshots/.extract_state.json",
+            scheduler_state=str(scheduler_state),
+            capture_script="./src/capture_and_render.py",
+        )
+    )
+
+    monkeypatch.setenv("NEXTCLOUD_UPLOAD_ENABLED", "true")
+    monkeypatch.setenv("NEXTCLOUD_URL", "http://192.168.1.145:30027")
+    monkeypatch.setenv("NEXTCLOUD_USERNAME", "nextcloud_admin")
+    monkeypatch.setenv("NEXTCLOUD_PASSWORD", "super-secret")
+    monkeypatch.setenv("NEXTCLOUD_REMOTE_PATH", "Projects/CarlosResidenceVlog")
+
+    calls = {"count": 0}
+
+    def fake_upload(file_path, **kwargs):
+        calls["count"] += 1
+        return "http://example.com/uploaded" 
+
+    monkeypatch.setattr("hikvision_timelapse_generator.pipeline_daemon.upload_video_to_nextcloud", fake_upload)
+
+    app._upload_rendered_video_if_configured()
+    app._upload_rendered_video_if_configured()
+
+    assert calls["count"] == 1
+    state = scheduler_state.read_text(encoding="utf-8")
+    assert "last_uploaded_video_sha256" in state
 
 
 def test_dockerfile_runs_daemon_in_foreground_by_default():

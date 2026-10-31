@@ -91,6 +91,18 @@ cp .env.example .env
 
 The scripts automatically read `.env` and support environment variables so you can avoid committing credentials or host-specific settings.
 
+To upload the rendered timelapse video to a Nextcloud instance after a successful daemon run, set the following values in `.env`:
+
+```env
+NEXTCLOUD_UPLOAD_ENABLED=true
+NEXTCLOUD_URL=http://192.168.1.145:30027
+NEXTCLOUD_USERNAME=nextcloud_admin
+NEXTCLOUD_PASSWORD=your_nextcloud_password
+NEXTCLOUD_REMOTE_PATH=Projects/CarlosResidenceVlog
+```
+
+The daemon will upload the generated video file to `remote.php/dav/files/<username>/<NEXTCLOUD_REMOTE_PATH>/<video-name>.mp4` using HTTP Basic auth without hardcoding any credentials in the codebase.
+
 ## Capture and render pipeline
 
 Extract frames:
