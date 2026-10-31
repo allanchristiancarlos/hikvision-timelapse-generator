@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 IMAGE_REPO="${DOCKER_IMAGE:-192.168.1.145:30142/admin-allan/hikvision-timelapse-generator}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 RELEASE_BRANCH="main"
+MAX_RELEASE_NOTES_ITEMS="12"
 DRY_RUN="false"
 
 usage() {
@@ -27,6 +28,7 @@ Notes:
   - Defaults to a patch release when no bump is supplied.
   - Releases are allowed only from the main branch.
   - If you are on another branch, switch to main and merge your changes first.
+  - Auto-generates business-focused release notes from recent commit history.
   - Pushes the current branch (if any local commits exist) and release tags to the Git remote.
   - Creates Git tags like v1.2.3, v1.2, and v1.
   - Publishes Docker tags like 1.2.3, 1.2, 1, and latest.
@@ -118,13 +120,86 @@ MINOR_TAG="v${MAJOR}.${MINOR}"
 MAJOR_TAG="v${MAJOR}"
 
 print_release_summary() {
-  cat <<EOF
-Release plan:
-  - version: ${NEXT_VERSION}
-  - git tags: ${GIT_TAG}, ${MINOR_TAG}, ${MAJOR_TAG}
-  - docker image: ${IMAGE_REPO}
-  - docker tags: ${NEXT_VERSION}, ${MAJOR}.${MINOR}, ${MAJOR}, latest
-EOF
+  echo "Release plan:"
+  echo "  - version: ${NEXT_VERSION}"
+  echo "  - git tags: ${GIT_TAG}, ${MINOR_TAG}, ${MAJOR_TAG}"
+  if [[ -n "$CURRENT_TAG" ]]; then
+    echo "  - notes baseline: ${CURRENT_TAG}"
+  else
+    echo "  - notes baseline: repository start"
+  fi
+  echo "  - docker image: ${IMAGE_REPO}"
+  echo "  - docker tags: ${NEXT_VERSION}, ${MAJOR}.${MINOR}, ${MAJOR}, latest"
+}
+
+clean_commit_subject() {
+  local subject="$1"
+  subject="$(echo "$subject" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  subject="$(echo "$subject" | sed -E 's/^[[:alpha:]]+(\([^)]*\))?!?:[[:space:]]*//')"
+  subject="$(echo "$subject" | sed -E 's/\b[A-Z]+-[0-9]+\b//g')"
+  subject="$(echo "$subject" | sed -E 's/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+  printf '%s' "$subject"
+}
+
+format_business_note() {
+  local summary="$1"
+  summary="${summary%[.!?]}"
+  local lowered="${summary,,}"
+
+  if [[ "$lowered" == *fix* || "$lowered" == *bug* || "$lowered" == *error* || "$lowered" == *issue* ]]; then
+    printf 'Improved reliability: %s.' "$summary"
+  elif [[ "$lowered" == *perf* || "$lowered" == *speed* || "$lowered" == *faster* || "$lowered" == *optimi* ]]; then
+    printf 'Improved processing efficiency: %s.' "$summary"
+  elif [[ "$lowered" == *security* || "$lowered" == *auth* || "$lowered" == *permission* || "$lowered" == *vuln* ]]; then
+    printf 'Strengthened operational safety: %s.' "$summary"
+  elif [[ "$lowered" == *feat* || "$lowered" == *add* || "$lowered" == *new* || "$lowered" == *support* || "$lowered" == *enable* ]]; then
+    printf 'Expanded product capability: %s.' "$summary"
+  else
+    printf 'Operational improvement: %s.' "$summary"
+  fi
+}
+
+generate_business_release_notes() {
+  local from_tag="$1"
+  local range="HEAD"
+  local baseline_text="Based on all changes currently in the project."
+  local total_commits=0
+  local remaining=0
+  local subject
+  local cleaned
+  local notes=()
+
+  if [[ -n "$from_tag" ]]; then
+    range="${from_tag}..HEAD"
+    baseline_text="Based on updates since ${from_tag}."
+  fi
+
+  total_commits="$(git rev-list --count "$range" 2>/dev/null || echo 0)"
+
+  while IFS= read -r subject; do
+    [[ -z "$subject" ]] && continue
+    cleaned="$(clean_commit_subject "$subject")"
+    [[ -z "$cleaned" ]] && cleaned="$subject"
+    notes+=("- $(format_business_note "$cleaned")")
+  done < <(git log --max-count="$MAX_RELEASE_NOTES_ITEMS" --pretty=format:'%s' "$range")
+
+  if [[ ${#notes[@]} -eq 0 ]]; then
+    notes+=("- Routine maintenance release focused on stable day-to-day operations.")
+  fi
+
+  if (( total_commits > MAX_RELEASE_NOTES_ITEMS )); then
+    remaining=$((total_commits - MAX_RELEASE_NOTES_ITEMS))
+    notes+=("- Plus ${remaining} additional maintenance and quality improvements.")
+  fi
+
+  echo "Business release notes"
+  echo "$baseline_text"
+  echo
+  for note in "${notes[@]}"; do
+    echo "$note"
+  done
+  echo
+  echo "Customer impact: smoother operations with clearer, more dependable outcomes."
 }
 
 ensure_git_tag() {
@@ -177,13 +252,20 @@ docker_tag_exists() {
   docker manifest inspect "$reference" >/dev/null 2>&1
 }
 
+BUSINESS_RELEASE_NOTES="$(generate_business_release_notes "$CURRENT_TAG")"
+
 if [[ "$DRY_RUN" == "true" ]]; then
   print_release_summary
+  echo
+  echo "$BUSINESS_RELEASE_NOTES"
+  echo
   echo "Dry run only; no files changed, no Docker image pushed, and no git refs pushed."
   exit 0
 fi
 
 print_release_summary
+echo
+echo "$BUSINESS_RELEASE_NOTES"
 
 # Ensure the branch is up to date before release.
 if [[ -n "$CURRENT_BRANCH" && "$CURRENT_BRANCH" != "HEAD" ]]; then
@@ -194,7 +276,9 @@ fi
 push_branch_changes "$CURRENT_BRANCH"
 
 # Create and push Git tags.
-ensure_git_tag "$GIT_TAG" "Release ${GIT_TAG}"
+ensure_git_tag "$GIT_TAG" "Release ${GIT_TAG}
+
+${BUSINESS_RELEASE_NOTES}"
 ensure_git_tag "$MINOR_TAG" "Release ${MINOR_TAG}"
 ensure_git_tag "$MAJOR_TAG" "Release ${MAJOR_TAG}"
 
@@ -232,4 +316,6 @@ Version: ${NEXT_VERSION}
 Git tags: ${GIT_TAG}, ${MINOR_TAG}, ${MAJOR_TAG}
 Docker tags: ${NEXT_VERSION}, ${MAJOR}.${MINOR}, ${MAJOR}, latest
 Docker image: ${IMAGE_REPO}
+
+${BUSINESS_RELEASE_NOTES}
 EOF
