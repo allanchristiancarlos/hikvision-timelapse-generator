@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--video-fps", type=int, default=env_int("PIPELINE_VIDEO_FPS", 24), help="Timelapse FPS")
     parser.add_argument("--state-file", default=env_str("PIPELINE_STATE_FILE", "./screenshots/.extract_state.json"), help="Extraction/render state file")
     parser.add_argument("--scheduler-state", default=env_str("PIPELINE_SCHEDULER_STATE", "./screenshots/.daily_pipeline_state.json"), help="Scheduler state file")
-    parser.add_argument("--play-rtsp-script", default=env_str("PIPELINE_PLAY_RTSP_SCRIPT", "./play_rtsp.py"), help="Path to play_rtsp.py")
+    parser.add_argument("--capture-script", default=env_str("PIPELINE_CAPTURE_SCRIPT", env_str("PIPELINE_PLAY_RTSP_SCRIPT", "./src/capture_and_render.py")), help="Path to capture_and_render.py")
     parser.add_argument("--once", action="store_true", help="Run one cycle now and exit")
     return parser.parse_args()
 
@@ -74,7 +74,7 @@ def main():
         video_fps=args.video_fps,
         state_file=args.state_file,
         scheduler_state=args.scheduler_state,
-        play_rtsp_script=args.play_rtsp_script,
+        capture_script=args.capture_script,
     )
 
     app = BackgroundPipelineApp(config)

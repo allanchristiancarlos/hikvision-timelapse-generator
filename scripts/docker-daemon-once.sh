@@ -18,4 +18,4 @@ exec docker run --rm -it \
   -v "$ROOT_DIR/screenshots:/app/screenshots" \
   --entrypoint python \
   "$IMAGE_NAME" \
-  daily_pipeline.py --once "$@"
+  src/run_capture_daemon.py --once "$@"

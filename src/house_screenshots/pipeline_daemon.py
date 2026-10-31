@@ -85,7 +85,7 @@ class BackgroundPipelineConfig:
     video_fps: int
     state_file: str
     scheduler_state: str
-    play_rtsp_script: str
+    capture_script: str
 
 
 class BackgroundPipelineApp:
@@ -98,7 +98,7 @@ class BackgroundPipelineApp:
 
     def run_pipeline(self, env):
         args = self.config
-        script_path = Path(args.play_rtsp_script)
+        script_path = Path(args.capture_script)
         if not script_path.exists():
             raise FileNotFoundError(f"play_rtsp script not found: {script_path}")
 

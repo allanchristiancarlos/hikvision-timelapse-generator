@@ -18,4 +18,4 @@ exec docker run --rm -it \
   -v "$ROOT_DIR/screenshots:/app/screenshots" \
   --entrypoint python \
   "$IMAGE_NAME" \
-  play_rtsp.py --render-video "$@"
+  src/capture_and_render.py --render-video "$@"

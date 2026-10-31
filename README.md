@@ -4,13 +4,13 @@ A modular terminal app for extracting still screenshots from a Hikvision NVR and
 
 ## Project structure
 
-- `house_screenshots/frame_capture_pipeline.py`: frame-capture pipeline module.
-- `house_screenshots/timelapse_renderer.py`: incremental timelapse rendering module.
-- `house_screenshots/pipeline_daemon.py`: background application service.
-- `house_screenshots/capture_cli.py`: capture/render CLI composition root.
-- `house_screenshots/daemon_cli.py`: scheduler CLI composition root.
-- `play_rtsp.py`: user-facing extraction/render entrypoint.
-- `daily_pipeline.py`: user-facing background scheduler entrypoint.
+- `src/house_screenshots/frame_capture_pipeline.py`: frame-capture pipeline module.
+- `src/house_screenshots/timelapse_renderer.py`: incremental timelapse rendering module.
+- `src/house_screenshots/pipeline_daemon.py`: background application service.
+- `src/house_screenshots/capture_cli.py`: capture/render CLI composition root.
+- `src/house_screenshots/daemon_cli.py`: scheduler CLI composition root.
+- `src/capture_and_render.py`: user-facing extraction/render entrypoint.
+- `src/run_capture_daemon.py`: user-facing background scheduler entrypoint.
 
 ## Install
 
@@ -26,7 +26,7 @@ Build image:
 ./scripts/docker-build.sh
 ```
 
-Extract frames (passes through any play_rtsp.py args):
+Extract frames (passes through any src/capture_and_render.py args):
 
 ```bash
 ./scripts/docker-extract.sh --date 2026-10-15:2026-10-31 --frames-per-day 48
@@ -83,7 +83,7 @@ The scripts automatically read `.env` and support environment variables so you c
 Extract frames:
 
 ```bash
-python3 play_rtsp.py \
+python3 src/capture_and_render.py \
   --host "$RTSP_HOST" \
   --date 2026-10-15:2026-10-31 \
   --frames-per-day 48
@@ -92,7 +92,7 @@ python3 play_rtsp.py \
 Render/append timelapse from extracted frames:
 
 ```bash
-python3 play_rtsp.py --render-video
+python3 src/capture_and_render.py --render-video
 ```
 
 ## Background scheduler
@@ -100,13 +100,13 @@ python3 play_rtsp.py --render-video
 Run one cycle now:
 
 ```bash
-python3 daily_pipeline.py --once
+python3 src/run_capture_daemon.py --once
 ```
 
 Run as a daily daemon using values from `.env`:
 
 ```bash
-python3 daily_pipeline.py
+python3 src/run_capture_daemon.py
 ```
 
 Override any value at runtime with CLI flags when needed.
