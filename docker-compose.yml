@@ -1,0 +1,19 @@
+services:
+  daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hikvision-timelapse-generator:latest
+    container_name: hikvision-timelapse-generator-daemon
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${PIPELINE_TZ:-Asia/Manila}
+      DAILY_PIPELINE_ENV_FILE: /app/.env
+    volumes:
+      - /mnt/tank/hikvision-timelapse-generator/screenshots:/app/screenshots
+      - /mnt/tank/hikvision-timelapse-generator/.env:/app/.env:ro
+    command: []
+    stdin_open: true
+    tty: true
