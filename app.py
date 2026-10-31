@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import getpass
+import os
 import re
 import shutil
 import struct
@@ -298,13 +299,13 @@ def prompt_for_value(question: str, default: str = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Capture Hikvision NVR screenshots at fixed intervals for one date.")
-    parser.add_argument("--host", default="192.168.1.27", help="NVR IP or hostname")
+    parser.add_argument("--host", default=os.environ.get("RTSP_HOST"), help="NVR IP or hostname (or RTSP_HOST env)")
     parser.add_argument("--date", type=parse_date, help="Date to capture in YYYY-MM-DD format")
-    parser.add_argument("--channel", type=int, default=1, help="Camera channel number to capture")
-    parser.add_argument("--interval-hours", type=float, default=1.0, help="How many hours between screenshots")
-    parser.add_argument("--output-dir", default="./screenshots", help="Folder for generated JPG files")
-    parser.add_argument("--username", help="Hikvision username")
-    parser.add_argument("--password", help="Hikvision password")
+    parser.add_argument("--channel", type=int, default=int(os.environ.get("HIKVISION_CHANNEL", "1")), help="Camera channel number to capture")
+    parser.add_argument("--interval-hours", type=float, default=float(os.environ.get("HIKVISION_INTERVAL_HOURS", "1.0")), help="How many hours between screenshots")
+    parser.add_argument("--output-dir", default=os.environ.get("HIKVISION_OUTPUT_DIR", "./screenshots"), help="Folder for generated JPG files")
+    parser.add_argument("--username", default=os.environ.get("RTSP_USERNAME"), help="Hikvision username")
+    parser.add_argument("--password", default=os.environ.get("RTSP_PASSWORD"), help="Hikvision password")
     parser.add_argument("--test-screenshot", action="store_true", help="Generate a sample screenshot without contacting the NVR")
     parser.add_argument("--channel-scan", action="store_true", help="Try channels 1-8 to find a working Hikvision camera number")
     parser.add_argument("--delay-seconds", type=float, default=2.0, help="Delay between NVR requests to avoid bursts")
@@ -319,6 +320,8 @@ def main():
         return 0
 
     if args.channel_scan:
+        if not args.host:
+            parser.error("--host is required (or set RTSP_HOST env)")
         for channel in range(1, 9):
             print(f"Checking channel {channel}...")
             try:
@@ -337,6 +340,9 @@ def main():
 
     if not args.date:
         parser.error("--date is required unless using --test-screenshot")
+
+    if not args.host:
+        parser.error("--host is required (or set RTSP_HOST env)")
 
     username = args.username or prompt_for_value("Hikvision username")
     password = args.password or getpass.getpass("Hikvision password: ")

@@ -16,36 +16,103 @@ from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
 
 
+def load_env_file(path: Path):
+    if not path.exists():
+        return
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+
+        os.environ.setdefault(key, value)
+
+
+def env_str(name: str, default=None):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def env_optional_float(name: str):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Play, record, or capture a single frame from an RTSP stream.")
     parser.add_argument(
         "--url",
         help="Full RTSP URL (optional when using --host --date --time)",
     )
-    parser.add_argument("--host", help="NVR IP or domain, for example 192.168.1.27")
-    parser.add_argument("--date", help="Recording date in YYYY-MM-DD, or range YYYY-MM-DD:YYYY-MM-DD")
-    parser.add_argument("--time", help="Recording time in HH:MM or HH:MM:SS")
+    parser.add_argument("--host", default=env_str("RTSP_HOST"), help="NVR IP or domain (or RTSP_HOST in .env)")
+    parser.add_argument("--date", default=env_str("EXTRACT_DATE"), help="Recording date in YYYY-MM-DD, or range YYYY-MM-DD:YYYY-MM-DD")
+    parser.add_argument("--time", default=env_str("EXTRACT_TIME"), help="Recording time in HH:MM or HH:MM:SS")
     parser.add_argument("--render-video", action="store_true", help="Render/append a 30fps video from extracted frame images")
-    parser.add_argument("--frames-dir", default="./screenshots", help="Folder containing extracted frame_*.jpg files")
-    parser.add_argument("--video-output", default="./screenshots/timelapse.mp4", help="Rendered output video path")
-    parser.add_argument("--video-fps", type=int, default=24, help="Output video FPS for render-video mode")
+    parser.add_argument("--frames-dir", default=env_str("PIPELINE_FRAMES_DIR", "./screenshots"), help="Folder containing extracted frame_*.jpg files")
+    parser.add_argument("--video-output", default=env_str("PIPELINE_VIDEO_OUTPUT", "./screenshots/timelapse.mp4"), help="Rendered output video path")
+    parser.add_argument("--video-fps", type=int, default=env_int("PIPELINE_VIDEO_FPS", 24), help="Output video FPS for render-video mode")
     parser.add_argument("--rerender-all", action="store_true", help="Render video from all frames again, ignoring incremental state")
-    parser.add_argument("--interval-hours", type=float, help="Batch mode: capture one frame every N hours for the provided --date")
-    parser.add_argument("--frames-per-day", type=int, help="Batch mode: capture exactly this many evenly spaced frames across the provided --date")
-    parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between batch requests to avoid overloading NVR")
-    parser.add_argument("--parallel-jobs", type=int, default=1, help="Batch mode concurrency. Default is 1 (sequential). Set >1 for faster parallel captures")
-    parser.add_argument("--state-file", default="./screenshots/.extract_state.json", help="Resume state file path for batch mode")
-    parser.add_argument("--track", type=int, default=801, help="Hikvision RTSP track id (default: 801)")
-    parser.add_argument("--window-seconds", type=int, default=4, help="Clip window used to build start/end times from date/time")
-    parser.add_argument("--clip-seconds", type=float, default=1.0, help="How many seconds to download before extracting a frame")
-    parser.add_argument("--frame-offset-seconds", type=float, default=0.0, help="Offset inside the downloaded clip for the output frame")
-    parser.add_argument("--connect-timeout-seconds", type=float, default=5.0, help="RTSP connect/read timeout in seconds")
-    parser.add_argument("--username", help="RTSP basic auth username")
-    parser.add_argument("--password", help="RTSP basic auth password")
+    parser.add_argument("--interval-hours", type=float, default=env_optional_float("EXTRACT_INTERVAL_HOURS"), help="Batch mode: capture one frame every N hours for the provided --date")
+    parser.add_argument("--frames-per-day", type=int, default=(env_int("PIPELINE_FRAMES_PER_DAY", 0) or None), help="Batch mode: capture exactly this many evenly spaced frames across the provided --date")
+    parser.add_argument("--delay-seconds", type=float, default=env_float("PIPELINE_DELAY_SECONDS", 1.0), help="Delay between batch requests to avoid overloading NVR")
+    parser.add_argument("--parallel-jobs", type=int, default=env_int("PIPELINE_PARALLEL_JOBS", 1), help="Batch mode concurrency. Default is 1 (sequential). Set >1 for faster parallel captures")
+    parser.add_argument("--state-file", default=env_str("PIPELINE_STATE_FILE", "./screenshots/.extract_state.json"), help="Resume state file path for batch mode")
+    parser.add_argument("--track", type=int, default=env_int("RTSP_TRACK", 801), help="Hikvision RTSP track id (default: 801)")
+    parser.add_argument("--window-seconds", type=int, default=env_int("PIPELINE_WINDOW_SECONDS", 4), help="Clip window used to build start/end times from date/time")
+    parser.add_argument("--clip-seconds", type=float, default=env_float("PIPELINE_CLIP_SECONDS", 1.0), help="How many seconds to download before extracting a frame")
+    parser.add_argument("--frame-offset-seconds", type=float, default=env_float("EXTRACT_FRAME_OFFSET_SECONDS", 0.0), help="Offset inside the downloaded clip for the output frame")
+    parser.add_argument("--connect-timeout-seconds", type=float, default=env_float("PIPELINE_CONNECT_TIMEOUT_SECONDS", 5.0), help="RTSP connect/read timeout in seconds")
+    parser.add_argument("--username", default=env_str("RTSP_USERNAME"), help="RTSP basic auth username")
+    parser.add_argument("--password", default=env_str("RTSP_PASSWORD"), help="RTSP basic auth password")
     parser.add_argument(
         "--transport",
         choices=["tcp", "udp"],
-        default="tcp",
+        default=env_str("RTSP_TRANSPORT", "tcp"),
         help="RTSP transport protocol (default: tcp)",
     )
     parser.add_argument(
@@ -625,9 +692,24 @@ def run_frame_capture(url, output, username, password, args, env):
 
 
 def main():
+    env_file = Path(os.environ.get("PLAY_RTSP_ENV_FILE", ".env"))
+    load_env_file(env_file)
+
     args = parse_args()
+    # Keep env fallbacks here too, so execution remains robust even if argparse defaults change.
+    args.host = args.host or env_str("RTSP_HOST")
+    args.username = args.username or env_str("RTSP_USERNAME")
+    args.password = args.password or env_str("RTSP_PASSWORD")
+    args.date = args.date or env_str("EXTRACT_DATE")
+    args.time = args.time or env_str("EXTRACT_TIME")
+
     today = datetime.now().date()
     now_dt = datetime.now()
+
+    if not args.date:
+        start_date = env_str("PIPELINE_START_DATE")
+        if start_date:
+            args.date = f"{start_date}:{today.isoformat()}"
 
     if args.interval_hours is not None and args.frames_per_day is not None:
         print("Use either --interval-hours or --frames-per-day, not both.", file=sys.stderr)
@@ -659,7 +741,7 @@ def main():
             if not args.date:
                 raise ValueError("--date is required when using --interval-hours or --frames-per-day.")
             if not args.host:
-                raise ValueError("--host is required in batch mode.")
+                raise ValueError("--host is required in batch mode. Set RTSP_HOST in .env/.env file or pass --host.")
             days = parse_date_range(args.date)
             original_day_count = len(days)
             days = [d for d in days if d.date() <= today]
