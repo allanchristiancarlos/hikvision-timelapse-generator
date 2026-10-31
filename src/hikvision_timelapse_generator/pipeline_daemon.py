@@ -166,6 +166,25 @@ class BackgroundPipelineApp:
         self.run_pipeline(env)
         return 0
 
+    def _run_and_persist_state(self, scheduler_state_path: Path, env):
+        state = load_json(scheduler_state_path)
+        try:
+            log("Starting daily extraction and video render")
+            self.run_pipeline(env)
+            state["last_successful_date"] = datetime.now().date().isoformat()
+            state["last_run_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            state["last_run_epoch"] = time.time()
+            state["last_status"] = "success"
+            save_json(scheduler_state_path, state)
+            log("Daily run completed successfully")
+        except Exception as exc:
+            state["last_run_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            state["last_run_epoch"] = time.time()
+            state["last_status"] = "failed"
+            state["last_error"] = str(exc)
+            save_json(scheduler_state_path, state)
+            log(f"Daily run failed: {exc}")
+
     def run_forever(self, env):
         args = self.config
         scheduler_state_path = Path(args.scheduler_state)
@@ -179,6 +198,9 @@ class BackgroundPipelineApp:
             log(f"Interval schedule: every {args.every_minutes} minute(s)")
         else:
             log(f"Schedule time: {args.run_at} local")
+
+        # Always run immediately on daemon startup before resuming schedule checks.
+        self._run_and_persist_state(scheduler_state_path, env)
 
         while True:
             now = datetime.now()
@@ -197,22 +219,7 @@ class BackgroundPipelineApp:
                 should_run = should_run_today(now, run_at, last_successful_date)
 
             if should_run:
-                try:
-                    log("Starting daily extraction and video render")
-                    self.run_pipeline(env)
-                    state["last_successful_date"] = now.date().isoformat()
-                    state["last_run_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-                    state["last_run_epoch"] = time.time()
-                    state["last_status"] = "success"
-                    save_json(scheduler_state_path, state)
-                    log("Daily run completed successfully")
-                except Exception as exc:
-                    state["last_run_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-                    state["last_run_epoch"] = time.time()
-                    state["last_status"] = "failed"
-                    state["last_error"] = str(exc)
-                    save_json(scheduler_state_path, state)
-                    log(f"Daily run failed: {exc}")
+                self._run_and_persist_state(scheduler_state_path, env)
 
             if args.every_minutes is not None:
                 nxt = next_interval_run_datetime(datetime.now(), args.every_minutes)

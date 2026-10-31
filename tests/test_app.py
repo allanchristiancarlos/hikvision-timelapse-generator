@@ -1,5 +1,6 @@
 import logging
 import sys
+import pytest
 from datetime import datetime
 from pathlib import Path
 
@@ -116,6 +117,55 @@ def test_background_pipeline_logs_redact_passwords(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "super-secret" not in captured.out
     assert "***" in captured.out
+
+
+def test_daemon_runs_immediately_on_start_and_keeps_schedule(tmp_path, monkeypatch):
+    scheduler_state = tmp_path / ".daily_pipeline_state.json"
+
+    app = BackgroundPipelineApp(
+        BackgroundPipelineConfig(
+            host="example.local",
+            username="alice",
+            password="super-secret",
+            start_date="2026-10-01",
+            run_at="23:59",
+            every_minutes=None,
+            frames_per_day=48,
+            track=801,
+            window_seconds=4,
+            clip_seconds=1.0,
+            connect_timeout_seconds=5.0,
+            delay_seconds=0.0,
+            parallel_jobs=1,
+            transport="tcp",
+            frames_dir="./screenshots",
+            video_output="./screenshots/timelapse.mp4",
+            video_fps=24,
+            state_file="./screenshots/.extract_state.json",
+            scheduler_state=str(scheduler_state),
+            capture_script="./src/capture_and_render.py",
+        )
+    )
+
+    run_calls = {"count": 0}
+
+    def fake_run_pipeline(_env):
+        run_calls["count"] += 1
+
+    def stop_after_first_sleep(_seconds):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(app, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("hikvision_timelapse_generator.pipeline_daemon.should_run_today", lambda *_: False)
+    monkeypatch.setattr("hikvision_timelapse_generator.pipeline_daemon.time.sleep", stop_after_first_sleep)
+
+    with pytest.raises(KeyboardInterrupt):
+        app.run_forever({"PATH": "/usr/bin"})
+
+    state = scheduler_state.read_text(encoding="utf-8")
+
+    assert run_calls["count"] == 1
+    assert '"last_status": "success"' in state
 
 
 def test_configure_logging_emits_colorized_sections(capsys):
