@@ -8,7 +8,7 @@ from house_screenshots.frame_capture_pipeline import (
     build_rtsp_url_from_time,
 )
 from house_screenshots.pipeline_daemon import BackgroundPipelineApp, BackgroundPipelineConfig, build_date_range
-from house_screenshots.runtime import redacted_command
+from house_screenshots.runtime import configure_logging, redacted_command
 
 
 def test_build_capture_times_for_date_uses_interval_hours():
@@ -114,3 +114,16 @@ def test_background_pipeline_logs_redact_passwords(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "super-secret" not in captured.out
     assert "***" in captured.out
+
+
+def test_configure_logging_emits_colorized_sections(capsys):
+    logger = configure_logging(force_color=True)
+    logger.info("Frame extraction started")
+    logger.warning("Retrying a failed frame")
+    logger.error("Capture command failed")
+
+    captured = capsys.readouterr()
+    assert "INFO" in captured.out
+    assert "WARNING" in captured.out
+    assert "ERROR" in captured.out
+    assert "\x1b[" in captured.out

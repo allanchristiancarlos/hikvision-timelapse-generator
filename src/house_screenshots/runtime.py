@@ -1,5 +1,7 @@
+import logging
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -108,16 +110,70 @@ def redacted_command(command):
     return redacted
 
 
+class ColorFormatter(logging.Formatter):
+    COLORS = {
+        "DEBUG": "\033[36m",
+        "INFO": "\033[32m",
+        "WARNING": "\033[33m",
+        "ERROR": "\033[31m",
+        "CRITICAL": "\033[35m",
+    }
+    RESET = "\033[0m"
+
+    def __init__(self, *args, force_color=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.force_color = force_color
+
+    def format(self, record):
+        message = super().format(record)
+        color_prefix = self.COLORS.get(record.levelname, "")
+        if not color_prefix or not (self.force_color or sys.stdout.isatty()):
+            return message
+        return f"{color_prefix}{message}{self.RESET}"
+
+
+class DynamicStreamHandler(logging.StreamHandler):
+    def __init__(self, stream_name="stdout"):
+        super().__init__()
+        self.stream_name = stream_name
+
+    def emit(self, record):
+        stream = sys.stdout if self.stream_name == "stdout" else sys.stderr
+        self.stream = stream
+        super().emit(record)
+
+
+def configure_logging(level=logging.INFO, *, force_color=True):
+    logger = logging.getLogger("house_screenshots")
+    logger.setLevel(level)
+    logger.propagate = False
+    logger.handlers.clear()
+
+    handler = DynamicStreamHandler("stdout")
+    handler.setFormatter(ColorFormatter(
+        "%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force_color=force_color,
+    ))
+    logger.addHandler(handler)
+    return logger
+
+
+def get_logger():
+    return logging.getLogger("house_screenshots")
+
+
 def timed_subprocess_run(command, *, env, timeout, label, check=True):
+    logger = get_logger()
     started = time.perf_counter()
-    print(f"[timing] {label} started")
     try:
         result = subprocess.run(command, check=check, env=env, timeout=timeout)
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
         elapsed = time.perf_counter() - started
-        print(f"[timing] {label} failed after {elapsed:.2f}s")
+        logger.error("[%s] failed after %.2fs", label, elapsed)
         raise
 
-    elapsed = time.perf_counter() - started
-    print(f"[timing] {label} completed in {elapsed:.2f}s")
     return result
+
+
+configure_logging()

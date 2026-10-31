@@ -4,13 +4,16 @@ import json
 import os
 import shutil
 import time
+from logging import getLogger
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlparse, urlunparse
 
-from .runtime import redacted_command, timed_subprocess_run
+from .runtime import get_logger, redacted_command, timed_subprocess_run
+
+logger = getLogger("house_screenshots")
 
 
 @dataclass
@@ -252,7 +255,11 @@ def run_frame_capture(url: str, output: Path, config: FrameExtractionConfig, env
     effective_frame_offset = config.frame_offset_seconds
     min_safe_clip = max(0.1, config.clip_seconds)
     if effective_frame_offset >= min_safe_clip:
-        print(f"[timing] frame offset {effective_frame_offset:.2f}s exceeds clip length {config.clip_seconds:.2f}s, using 0.0s")
+        logger.warning(
+            "Frame offset %.2fs exceeds clip length %.2fs; using 0.0s",
+            effective_frame_offset,
+            config.clip_seconds,
+        )
         effective_frame_offset = 0.0
 
     frame_command = build_ffmpeg_extract_frame_command(
@@ -261,12 +268,9 @@ def run_frame_capture(url: str, output: Path, config: FrameExtractionConfig, env
         frame_offset_seconds=effective_frame_offset,
     )
 
-    print("clip:", " ".join(redacted_command(clip_command)))
-    print("frame:", " ".join(redacted_command(frame_command)))
-
     clip_timeout = max(10.0, config.connect_timeout_seconds + config.clip_seconds + 4.0)
     frame_timeout = 8.0
-    print(f"[timing] configured timeouts -> clip: {clip_timeout:.1f}s, frame extract: {frame_timeout:.1f}s")
+    logger.info("Capture window: clip %.1fs, frame %.1fs", clip_timeout, frame_timeout)
 
     try:
         timed_subprocess_run(
@@ -294,7 +298,7 @@ def build_capture_plan(date_value: str, frames_per_day: Optional[int], interval_
     days = [d for d in days if d.date() <= today]
     skipped_future_days = original_day_count - len(days)
     if skipped_future_days > 0:
-        print(f"Ignoring {skipped_future_days} future day(s) after {today.isoformat()}.")
+        logger.info("Ignoring %s future day(s) after %s.", skipped_future_days, today.isoformat())
     if not days:
         raise ValueError(f"All requested dates are in the future. Use a date on or before {today.isoformat()}.")
 
@@ -313,7 +317,7 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
     capture_times = build_capture_plan(date_value, frames_per_day, interval_hours, today)
 
     state = load_state(state_path)
-    print(f"Resume state file: {state_path}")
+    logger.info("Resume state file: %s", state_path)
 
     all_items = []
     skipped_existing = 0
@@ -348,14 +352,14 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
 
         all_items.append((ts, output_path, key))
 
-    if skipped_existing > 0:
-        print(f"Skipping {skipped_existing} already extracted frame(s) found on disk.")
-    if skipped_future > 0:
-        print(f"Skipping {skipped_future} future frame(s) that have not happened yet.")
-    if skipped_failed > 0:
-        print(f"Skipping {skipped_failed} previously failed frame(s) from state file.")
-    if retried_failed_today > 0:
-        print(f"Retrying {retried_failed_today} previously failed frame(s) dated today.")
+    if skipped_existing or skipped_future or skipped_failed or retried_failed_today:
+        logger.info(
+            "Batch state: %s existing, %s future, %s failed, %s retried today",
+            skipped_existing,
+            skipped_future,
+            skipped_failed,
+            retried_failed_today,
+        )
 
     save_state(state_path, state)
 
@@ -365,21 +369,21 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
     jobs = resolve_parallel_jobs(config.parallel_jobs)
 
     if total == 0:
-        print("Nothing to do: all frames in range are already extracted.")
+        logger.info("No new frames needed; all requested captures already exist.")
         return 0
 
     def _capture_one(index, ts, ts_output):
         ts_output.parent.mkdir(parents=True, exist_ok=True)
         ts_url = build_rtsp_url_from_time(config.host, config.track, ts, config.window_seconds)
-        print(f"[{index}/{total}] Capturing {ts.strftime('%Y-%m-%d %H:%M:%S')} -> {ts_output}")
         run_frame_capture(ts_url, ts_output, config, env)
         return index, ts, ts_output
 
     if jobs <= 1:
         for index, (ts, ts_output, key) in enumerate(all_items, start=1):
+            ts_label = ts.strftime('%Y-%m-%d %H:%M:%S')
+            logger.info("[%s/%s] frame %s -> %s", index, total, ts_label, ts_output.name)
             try:
                 _, _, ts_output = _capture_one(index, ts, ts_output)
-                print(f"[{index}/{total}] Saved {ts_output}")
                 state["completed"][key] = {
                     "output": str(ts_output),
                     "completed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -388,7 +392,7 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
                 save_state(state_path, state)
                 success += 1
             except Exception as exc:
-                print(f"[{index}/{total}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.error("[%s/%s] failed for %s", index, total, ts_label)
                 state["failed"][key] = {
                     "output": str(ts_output),
                     "error": str(exc),
@@ -398,7 +402,6 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
                 failures += 1
 
             if index < total and config.delay_seconds > 0:
-                print(f"[timing] sleeping {config.delay_seconds:.2f}s before next interval")
                 time.sleep(config.delay_seconds)
     else:
         future_to_meta = {}
@@ -411,9 +414,10 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
 
             for future in concurrent.futures.as_completed(future_to_meta):
                 index, ts, ts_output, key = future_to_meta[future]
+                ts_label = ts.strftime('%Y-%m-%d %H:%M:%S')
                 try:
                     _, _, ts_output = future.result()
-                    print(f"[{index}/{total}] Saved {ts_output}")
+                    logger.info("[%s/%s] saved %s", index, total, ts_label)
                     state["completed"][key] = {
                         "output": str(ts_output),
                         "completed_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -422,7 +426,7 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
                     save_state(state_path, state)
                     success += 1
                 except Exception as exc:
-                    print(f"[{index}/{total}] Capture failed for {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.error("[%s/%s] failed for %s", index, total, ts_label)
                     state["failed"][key] = {
                         "output": str(ts_output),
                         "error": str(exc),
@@ -431,8 +435,9 @@ def run_batch_capture(config: FrameExtractionConfig, date_value: str, frames_per
                     save_state(state_path, state)
                     failures += 1
 
-    print(f"Batch complete: {success} succeeded, {failures} failed")
+    logger.info("Batch complete: %s succeeded, %s failed", success, failures)
     if failures > 0:
+        logger.warning("Batch run finished with %s failed frame(s).", failures)
         return 5
     return 0
 

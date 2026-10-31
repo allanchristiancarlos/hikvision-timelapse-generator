@@ -9,10 +9,12 @@ from datetime import datetime
 from pathlib import Path
 
 from .runtime import (
+    configure_logging,
     env_float,
     env_int,
     env_optional_float,
     env_str,
+    get_logger,
     has_display,
     load_env_file,
     redacted_command,
@@ -80,7 +82,11 @@ def build_ffmpeg_record_command(rtsp_url: str, output_path: str, transport: str 
     return command
 
 
+logger = get_logger()
+
+
 def main():
+    configure_logging()
     env_file = Path(os.environ.get("PLAY_RTSP_ENV_FILE", ".env"))
     load_env_file(env_file)
 
@@ -100,15 +106,15 @@ def main():
             args.date = f"{start_date}:{today.isoformat()}"
 
     if args.interval_hours is not None and args.frames_per_day is not None:
-        print("Use either --interval-hours or --frames-per-day, not both.", file=sys.stderr)
+        logger.error("Use either --interval-hours or --frames-per-day, not both.")
         return 1
 
     if not ffmpeg_available():
-        print("ffmpeg is not installed or not in PATH.", file=sys.stderr)
+        logger.error("ffmpeg is not installed or not in PATH.")
         return 2
 
     if args.mode == "play" and not ffplay_available():
-        print("ffplay is not installed or not in PATH. Install ffmpeg to get ffplay.", file=sys.stderr)
+        logger.error("ffplay is not installed or not in PATH. Install ffmpeg to get ffplay.")
         return 2
 
     env = os.environ.copy()
@@ -117,6 +123,7 @@ def main():
         Path(env["XDG_RUNTIME_DIR"]).mkdir(parents=True, exist_ok=True)
 
     if args.render_video:
+        logger.info("Render mode: %s -> %s (%s fps)", args.frames_dir, args.video_output, args.video_fps)
         try:
             return render_incremental_video(
                 frames_dir=Path(args.frames_dir),
@@ -127,7 +134,7 @@ def main():
                 env=env,
             )
         except ValueError as exc:
-            print(str(exc), file=sys.stderr)
+            logger.error(str(exc))
             return 1
 
     batch_mode = args.interval_hours is not None or args.frames_per_day is not None
@@ -149,7 +156,7 @@ def main():
                 raise ValueError(f"Requested date/time is in the future. Use a time on or before {now_dt.strftime('%Y-%m-%d %H:%M:%S')}.")
             url = build_rtsp_url_from_time(args.host, args.track, capture_dt, args.window_seconds)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        logger.error(str(exc))
         return 1
 
     username = args.username
@@ -177,7 +184,7 @@ def main():
         mode = "play" if has_display() else "record"
 
     if mode == "play" and not has_display():
-        print("No GUI display detected in container. Use --mode record or run with X forwarding.", file=sys.stderr)
+        logger.error("No GUI display detected in container. Use --mode record or run with X forwarding.")
         return 3
 
     overall_started = time.perf_counter()
@@ -193,23 +200,21 @@ def main():
                 no_audio=no_audio,
                 duration_seconds=args.duration_seconds,
             )
-            print(f"Recording stream to {output}...")
-            print(" ".join(redacted_command(command)))
+            logger.info("Recording stream to %s", output)
             timed_subprocess_run(command, check=True, env=env, timeout=None, label="record execution")
-            print(f"Recording complete: {output}")
+            logger.info("Recording complete: %s", output)
         elif mode == "play":
             command = build_ffplay_command(url, transport=args.transport, no_audio=no_audio)
-            print("Starting stream playback...")
-            print(" ".join(redacted_command(command)))
+            logger.info("Starting stream playback")
             timed_subprocess_run(command, check=True, env=env, timeout=None, label="play execution")
         else:
             if batch_mode:
                 output_dir = Path("./screenshots")
                 output_dir.mkdir(parents=True, exist_ok=True)
                 if args.frames_per_day is not None:
-                    print(f"Batch frame mode: evenly spaced captures across {args.date}.")
+                    logger.info("Batch frame mode: evenly spaced captures across %s.", args.date)
                 else:
-                    print(f"Batch frame mode: captures across {args.date} every {args.interval_hours} hour(s).")
+                    logger.info("Batch frame mode: captures across %s every %.2f hour(s).", args.date, args.interval_hours)
                 return run_batch_capture(
                     config=extraction_config,
                     date_value=args.date,
@@ -227,21 +232,21 @@ def main():
             else:
                 output = Path("./screenshots/frame.jpg")
             output.parent.mkdir(parents=True, exist_ok=True)
-            print(f"Downloading a short clip then extracting one frame to {output}...")
+            logger.info("Downloading a short clip then extracting one frame to %s", output)
             run_frame_capture(url, output, extraction_config, env)
-            print(f"Frame captured: {output}")
+            logger.info("Frame captured: %s", output)
     except FileNotFoundError:
-        print("Required ffmpeg command not found.", file=sys.stderr)
+        logger.error("Required ffmpeg command not found.")
         return 2
     except subprocess.TimeoutExpired:
-        print("ffmpeg timed out before finishing. Try a shorter clip or a larger --window-seconds.", file=sys.stderr)
+        logger.error("ffmpeg timed out before finishing. Try a shorter clip or a larger --window-seconds.")
         return 4
     except subprocess.CalledProcessError as exc:
-        print(f"ffmpeg/ffplay exited with return code {exc.returncode}.", file=sys.stderr)
+        logger.error("ffmpeg/ffplay exited with return code %s.", exc.returncode)
         return exc.returncode if isinstance(exc.returncode, int) else 1
 
     overall_elapsed = time.perf_counter() - overall_started
-    print(f"[timing] total runtime: {overall_elapsed:.2f}s")
+    logger.info("Run complete: %.2fs", overall_elapsed)
     return 0
 
 

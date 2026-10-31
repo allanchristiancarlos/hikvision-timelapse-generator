@@ -8,12 +8,14 @@ from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .runtime import redacted_command
+from .runtime import get_logger, redacted_command
+
+
+logger = get_logger()
 
 
 def log(msg: str):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    logger.info(msg)
 
 
 def parse_date_str(value: str) -> date:

@@ -4,7 +4,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .frame_capture_pipeline import load_state, save_state
-from .runtime import timed_subprocess_run
+from .runtime import get_logger, timed_subprocess_run
+
+logger = get_logger()
 
 
 def collect_frame_images(frames_dir: Path):
@@ -119,7 +121,7 @@ def render_video_target(frame_paths, output_video: Path, fps: int, state: dict, 
 
     rendered_names = set(render_state.get("rendered_frames", []))
     if rerender_all:
-        print(f"Rerender-all enabled: rebuilding {output_video.name} from all {label} frames.")
+        logger.info("Rebuilding %s from all %s frames", output_video.name, label)
         rendered_names = set()
         render_state["rendered_frames"] = []
 
@@ -129,18 +131,18 @@ def render_video_target(frame_paths, output_video: Path, fps: int, state: dict, 
         if inferred_rendered:
             render_state["rendered_frames"] = inferred_rendered
             rendered_names = set(inferred_rendered)
-            print(f"Bootstrapped {output_video.name} state with {len(inferred_rendered)} frame(s).")
+            logger.info("Restored %s rendered frames for %s", len(inferred_rendered), output_video.name)
 
     new_frames = [f for f in frame_paths if f.name not in rendered_names]
     if not new_frames:
         if output_video.exists():
-            print(f"No new {label} frames for {output_video.name}; skipping.")
+            logger.info("No new %s frames for %s; skipping.", label, output_video.name)
         else:
-            print(f"No {label} frames available to render {output_video.name}; skipping.")
+            logger.warning("No %s frames available to render %s", label, output_video.name)
         state["video_renders"][render_key] = render_state
         return
 
-    print(f"Rendering {len(new_frames)} new {label} frame(s) at {fps} fps -> {output_video.name}")
+    logger.info("Adding %s new %s frame(s) to %s at %s fps", len(new_frames), label, output_video.name, fps)
     output_video.parent.mkdir(parents=True, exist_ok=True)
 
     temp_segment = output_video.with_suffix(".append_segment.mp4")
@@ -167,7 +169,7 @@ def render_video_target(frame_paths, output_video: Path, fps: int, state: dict, 
         render_state["output"] = str(output_video)
         state["video_renders"][render_key] = render_state
 
-        print(f"Video ready: {output_video}")
+        logger.info("Video ready: %s", output_video.name)
     finally:
         for tmp in [temp_segment, temp_merged, temp_existing]:
             if tmp.exists():
@@ -185,7 +187,7 @@ def render_incremental_video(frames_dir: Path, output_video: Path, fps: int, sta
 
     all_frames = collect_frame_images(frames_dir)
     if not all_frames:
-        print("No frame images found to render.")
+        logger.warning("No frame images found to render.")
         return 0
 
     render_video_target(all_frames, output_video, fps, state, rerender_all, env, label="full")
