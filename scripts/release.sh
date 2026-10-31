@@ -8,6 +8,7 @@ IMAGE_REPO="${DOCKER_IMAGE:-192.168.1.145:30142/admin-allan/hikvision-timelapse-
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 RELEASE_BRANCH="main"
 MAX_RELEASE_NOTES_ITEMS="12"
+PUBLISH_GITHUB_RELEASE="${PUBLISH_GITHUB_RELEASE:-true}"
 DRY_RUN="false"
 
 usage() {
@@ -30,6 +31,8 @@ Notes:
   - If you are on another branch, switch to main and merge your changes first.
   - Auto-generates business-focused release notes from recent commit history.
   - Pushes the current branch (if any local commits exist) and release tags to the Git remote.
+  - Publishes/updates a GitHub Release for the version tag when gh CLI is available.
+  - Set PUBLISH_GITHUB_RELEASE=false to skip GitHub Release publishing.
   - Creates Git tags like v1.2.3, v1.2, and v1.
   - Publishes Docker tags like 1.2.3, 1.2, 1, and latest.
   - The image repository can be overridden with DOCKER_IMAGE.
@@ -130,6 +133,7 @@ print_release_summary() {
   fi
   echo "  - docker image: ${IMAGE_REPO}"
   echo "  - docker tags: ${NEXT_VERSION}, ${MAJOR}.${MINOR}, ${MAJOR}, latest"
+  echo "  - github release publishing: ${PUBLISH_GITHUB_RELEASE}"
 }
 
 clean_commit_subject() {
@@ -252,6 +256,45 @@ docker_tag_exists() {
   docker manifest inspect "$reference" >/dev/null 2>&1
 }
 
+github_release_exists() {
+  local tag="$1"
+  gh release view "$tag" >/dev/null 2>&1
+}
+
+publish_github_release() {
+  local tag="$1"
+  local title="Release ${tag}"
+  local body
+
+  if [[ "$PUBLISH_GITHUB_RELEASE" != "true" ]]; then
+    echo "GitHub Release publishing disabled (PUBLISH_GITHUB_RELEASE=${PUBLISH_GITHUB_RELEASE})."
+    return 0
+  fi
+
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "GitHub CLI (gh) is required to publish GitHub Releases." >&2
+    echo "Install gh or set PUBLISH_GITHUB_RELEASE=false to skip this step." >&2
+    exit 1
+  fi
+
+  body="$(cat <<EOF
+${BUSINESS_RELEASE_NOTES}
+
+Version details
+- Application version: ${NEXT_VERSION}
+- Docker tags: ${NEXT_VERSION}, ${MAJOR}.${MINOR}, ${MAJOR}, latest
+EOF
+)"
+
+  if github_release_exists "$tag"; then
+    gh release edit "$tag" --title "$title" --notes "$body"
+    echo "Updated GitHub Release: ${tag}"
+  else
+    gh release create "$tag" --title "$title" --notes "$body"
+    echo "Created GitHub Release: ${tag}"
+  fi
+}
+
 BUSINESS_RELEASE_NOTES="$(generate_business_release_notes "$CURRENT_TAG")"
 
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -259,6 +302,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo
   echo "$BUSINESS_RELEASE_NOTES"
   echo
+  if [[ "$PUBLISH_GITHUB_RELEASE" == "true" ]]; then
+    echo "Dry run: would create or update GitHub Release for ${GIT_TAG}."
+  else
+    echo "Dry run: GitHub Release publishing is disabled."
+  fi
   echo "Dry run only; no files changed, no Docker image pushed, and no git refs pushed."
   exit 0
 fi
@@ -309,6 +357,8 @@ for tag in "${NEXT_VERSION}" "${MAJOR}.${MINOR}" "${MAJOR}" "latest"; do
   echo "Pushed Docker tag: ${reference}"
 done
 
+publish_github_release "$GIT_TAG"
+
 cat <<EOF
 
 ✅ Release complete
@@ -316,6 +366,7 @@ Version: ${NEXT_VERSION}
 Git tags: ${GIT_TAG}, ${MINOR_TAG}, ${MAJOR_TAG}
 Docker tags: ${NEXT_VERSION}, ${MAJOR}.${MINOR}, ${MAJOR}, latest
 Docker image: ${IMAGE_REPO}
+GitHub Release: ${GIT_TAG}
 
 ${BUSINESS_RELEASE_NOTES}
 EOF
