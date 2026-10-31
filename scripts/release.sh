@@ -141,7 +141,7 @@ ensure_git_tag() {
 
 remote_tag_exists() {
   local tag="$1"
-  git ls-remote --tags "$GIT_REMOTE" "refs/tags/${tag}" >/dev/null 2>&1
+  [[ -n "$(git ls-remote --tags "$GIT_REMOTE" "refs/tags/${tag}")" ]]
 }
 
 push_tag() {
