@@ -1,61 +1,56 @@
-from datetime import date
+from datetime import datetime
 
-from app import build_capture_times, build_channel_candidates, build_record_search_xml, build_test_jpeg
-
-
-def test_build_capture_times_for_single_day():
-    result = build_capture_times(date(2026, 10, 27), interval_hours=1)
-
-    assert len(result) == 24
-    assert result[0].strftime("%H:%M") == "00:00"
-    assert result[-1].strftime("%H:%M") == "23:00"
+from house_screenshots.frame_capture_pipeline import (
+    build_capture_times_for_count,
+    build_capture_times_for_date,
+    build_ffmpeg_clip_command,
+    build_rtsp_url_from_time,
+)
+from house_screenshots.pipeline_daemon import build_date_range
 
 
-def test_build_capture_times_uses_custom_interval():
-    result = build_capture_times(date(2026, 10, 27), interval_hours=2)
+def test_build_capture_times_for_date_uses_interval_hours():
+    result = build_capture_times_for_date(datetime(2026, 10, 27), interval_hours=2)
 
     assert len(result) == 12
     assert result[0].strftime("%H:%M") == "00:00"
     assert result[-1].strftime("%H:%M") == "22:00"
 
 
-def test_build_channel_candidates_includes_hikvision_numeric_variants():
-    result = build_channel_candidates(2)
+def test_build_capture_times_for_count_evenly_spreads_day():
+    result = build_capture_times_for_count(datetime(2026, 10, 27), frames_per_day=24)
 
-    assert result == [2, 102]
-
-
-def test_build_record_search_xml_contains_time_window():
-    xml = build_record_search_xml(2, date(2026, 10, 26), date(2026, 10, 26))
-
-    assert "<channelID>2</channelID>" in xml
-    assert "<searchType>time</searchType>" in xml
+    assert len(result) == 24
+    assert result[0].strftime("%H:%M:%S") == "00:00:00"
+    assert result[1].strftime("%H:%M:%S") == "01:00:00"
 
 
-def test_build_test_jpeg_creates_valid_bytes():
-    data = build_test_jpeg()
+def test_build_rtsp_url_from_time_contains_window_times():
+    url = build_rtsp_url_from_time("example.local", 801, datetime(2026, 10, 31, 1, 2, 3), 4)
 
-    assert data.startswith(b"\x89PNG")
-    assert len(data) > 100
+    assert url.startswith("rtsp://example.local/Streaming/tracks/801/")
+    assert "starttime=20261031T010203Z" in url
+    assert "endtime=20261031T010207Z" in url
 
 
-def test_build_ffmpeg_download_command_includes_auth_and_output():
-    from app import build_ffmpeg_download_command
+def test_build_date_range_for_daemon_pipeline():
+    result = build_date_range(datetime(2026, 10, 1).date(), datetime(2026, 10, 31).date())
 
-    command = build_ffmpeg_download_command(
+    assert result == "2026-10-01:2026-10-31"
+
+
+def test_build_ffmpeg_clip_command_includes_transport_and_target_file():
+    command = build_ffmpeg_clip_command(
         "rtsp://example.local/stream",
-        "/tmp/example.mp4",
-        username="demo",
-        password="secret",
-        duration_seconds=30,
+        "/tmp/clip.ts",
+        transport="tcp",
+        duration_seconds=2.5,
+        relaxed=True,
     )
 
-    assert command[:3] == ["ffmpeg", "-y", "-rtsp_transport"]
-    assert "-user" in command
-    assert "demo" in command
-    assert "-password" in command
-    assert "secret" in command
-    assert "rtsp://example.local/stream" in command
-    assert "/tmp/example.mp4" in command
+    assert command[0] == "ffmpeg"
+    assert "-rtsp_transport" in command
+    assert "tcp" in command
     assert "-t" in command
-    assert "30" in command
+    assert "2.5" in command
+    assert "/tmp/clip.ts" in command

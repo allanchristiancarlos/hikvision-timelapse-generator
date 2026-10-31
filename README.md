@@ -1,12 +1,72 @@
 # House Screenshots
 
-A small terminal app for extracting still screenshots from a Hikvision NVR at fixed intervals.
+A modular terminal app for extracting still screenshots from a Hikvision NVR and rendering incremental timelapse videos.
+
+## Project structure
+
+- `house_screenshots/frame_capture_pipeline.py`: frame-capture pipeline module.
+- `house_screenshots/timelapse_renderer.py`: incremental timelapse rendering module.
+- `house_screenshots/pipeline_daemon.py`: background application service.
+- `house_screenshots/capture_cli.py`: capture/render CLI composition root.
+- `house_screenshots/daemon_cli.py`: scheduler CLI composition root.
+- `play_rtsp.py`: user-facing extraction/render entrypoint.
+- `daily_pipeline.py`: user-facing background scheduler entrypoint.
 
 ## Install
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
+
+## Docker helper scripts
+
+Build image:
+
+```bash
+./scripts/docker-build.sh
+```
+
+Extract frames (passes through any play_rtsp.py args):
+
+```bash
+./scripts/docker-extract.sh --date 2026-10-15:2026-10-31 --frames-per-day 48
+```
+
+Render timelapse video:
+
+```bash
+./scripts/docker-render.sh
+```
+
+Run daemon once:
+
+```bash
+./scripts/docker-daemon-once.sh
+```
+
+Start daemon in background container:
+
+```bash
+./scripts/docker-daemon-start.sh
+```
+
+View daemon logs:
+
+```bash
+./scripts/docker-daemon-logs.sh
+```
+
+Stop and remove daemon container:
+
+```bash
+./scripts/docker-daemon-stop.sh
+```
+
+Optional environment variables:
+
+- `HOUSE_SCREENSHOTS_IMAGE` to override image name (default: `house-screenshots`)
+- `HOUSE_SCREENSHOTS_ENV_FILE` to use a different env file (default: `.env`)
+- `HOUSE_SCREENSHOTS_CONTAINER_NAME` to rename daemon container (default: `house-screenshots-daemon`)
 
 ## Environment setup (recommended)
 
@@ -16,29 +76,26 @@ Copy [.env.example](.env.example) to `.env` and fill in your real values:
 cp .env.example .env
 ```
 
-The scripts automatically read `.env` (for `daily_pipeline.py`) and support environment variables (for `app.py` and `play_rtsp.py`) so you can avoid committing credentials or host-specific settings.
+The scripts automatically read `.env` and support environment variables so you can avoid committing credentials or host-specific settings.
 
-## Test command (safe)
+## Capture and render pipeline
 
-This generates a sample PNG without contacting your NVR:
-
-```bash
-python3 app.py --test-screenshot --output-dir ./demo
-```
-
-## Real usage
+Extract frames:
 
 ```bash
-python3 app.py \
-  --date 2026-10-27 \
-  --channel 1 \
-  --interval-hours 1 \
-  --output-dir ./screenshots
+python3 play_rtsp.py \
+  --host "$RTSP_HOST" \
+  --date 2026-10-15:2026-10-31 \
+  --frames-per-day 48
 ```
 
-If `RTSP_HOST`, `RTSP_USERNAME`, and `RTSP_PASSWORD` are in `.env`, you can omit `--host`, `--username`, and `--password`.
+Render/append timelapse from extracted frames:
 
-## Daily pipeline
+```bash
+python3 play_rtsp.py --render-video
+```
+
+## Background scheduler
 
 Run one cycle now:
 
@@ -56,7 +113,7 @@ Override any value at runtime with CLI flags when needed.
 
 You will be prompted for the Hikvision username and password.
 
-The app will save one screenshot per interval into a folder like:
+The app saves one screenshot per interval into a folder like:
 
 ```txt
 ./screenshots/2026-10-27/
