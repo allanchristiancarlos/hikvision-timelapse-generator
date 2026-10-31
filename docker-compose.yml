@@ -1,9 +1,6 @@
 services:
-  daemon:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: hikvision-timelapse-generator:latest
+  hikvision-timelapse-generator-daemon:
+    image: docker.verion.dev/admin-allan/hikvision-timelapse-generator:latest
     container_name: hikvision-timelapse-generator-daemon
     restart: unless-stopped
     env_file:

@@ -9,6 +9,7 @@ GIT_REMOTE="${GIT_REMOTE:-origin}"
 RELEASE_BRANCH="main"
 MAX_RELEASE_NOTES_ITEMS="12"
 PUBLISH_GITHUB_RELEASE="${PUBLISH_GITHUB_RELEASE:-true}"
+DOCKER_PLATFORMS="${DOCKER_PLATFORMS:-linux/amd64,linux/arm64}"
 DRY_RUN="false"
 
 usage() {
@@ -338,24 +339,20 @@ if [[ "$MAJOR_TAG" != "$MINOR_TAG" && "$MAJOR_TAG" != "$GIT_TAG" ]]; then
   push_tag "$MAJOR_TAG"
 fi
 
-# Build and push Docker image with semver-aligned tags.
-docker build \
+# Build and push a multi-arch Docker image for amd64 + arm64.
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "Docker Buildx is required to publish multi-architecture images." >&2
+  exit 1
+fi
+
+docker buildx build \
+  --platform "${DOCKER_PLATFORMS}" \
   -t "${IMAGE_REPO}:${NEXT_VERSION}" \
   -t "${IMAGE_REPO}:${MAJOR}.${MINOR}" \
   -t "${IMAGE_REPO}:${MAJOR}" \
   -t "${IMAGE_REPO}:latest" \
+  --push \
   .
-
-for tag in "${NEXT_VERSION}" "${MAJOR}.${MINOR}" "${MAJOR}" "latest"; do
-  reference="${IMAGE_REPO}:${tag}"
-  if docker_tag_exists "$reference"; then
-    echo "Docker tag ${reference} already exists in the registry; skipping push."
-    continue
-  fi
-
-  docker push "$reference"
-  echo "Pushed Docker tag: ${reference}"
-done
 
 publish_github_release "$GIT_TAG"
 
