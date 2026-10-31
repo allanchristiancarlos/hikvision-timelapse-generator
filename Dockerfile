@@ -16,4 +16,3 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 ENTRYPOINT ["python", "src/run_capture_daemon.py"]
-CMD ["--help"]

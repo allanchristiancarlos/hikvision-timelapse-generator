@@ -1,6 +1,7 @@
 import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from hikvision_timelapse_generator.frame_capture_pipeline import (
     build_capture_times_for_count,
@@ -136,3 +137,11 @@ def test_pipeline_logger_uses_configured_handler(capsys):
 
     captured = capsys.readouterr()
     assert "Frame 01/12 started" in captured.out
+
+
+def test_dockerfile_runs_daemon_in_foreground_by_default():
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+
+    assert 'ENTRYPOINT ["python", "src/run_capture_daemon.py"]' in dockerfile
+    assert 'CMD ["--help"]' not in dockerfile
