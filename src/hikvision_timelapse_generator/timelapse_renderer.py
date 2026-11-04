@@ -13,6 +13,16 @@ def collect_frame_images(frames_dir: Path):
     return sorted(frames_dir.glob("frame_*.jpg"))
 
 
+def sort_frames_chronologically(frame_paths):
+    def _sort_key(frame_path: Path):
+        ts = parse_frame_timestamp(frame_path)
+        if ts is not None:
+            return (0, ts, frame_path.name)
+        return (1, datetime.max, frame_path.name)
+
+    return sorted(frame_paths, key=_sort_key)
+
+
 def parse_frame_timestamp(frame_path: Path):
     name = frame_path.name
     if not (name.startswith("frame_") and name.endswith(".jpg")):
@@ -185,36 +195,38 @@ def render_incremental_video(frames_dir: Path, output_video: Path, fps: int, sta
 
     state = load_state(state_path)
 
-    all_frames = collect_frame_images(frames_dir)
+    all_frames = sort_frames_chronologically(collect_frame_images(frames_dir))
     if not all_frames:
         logger.warning("No frame images found to render.")
         return 0
 
-    render_video_target(all_frames, output_video, fps, state, rerender_all, env, label="full")
+    # Always rebuild the main timelapse so it is guaranteed to include every
+    # available frame from oldest to newest, regardless of prior incremental state.
+    render_video_target(all_frames, output_video, fps, state, True, env, label="full")
 
     frames_by_month = {}
     for frame in all_frames:
         ts = parse_frame_timestamp(frame)
         if ts is None:
             continue
-        month_num = ts.month
-        frames_by_month.setdefault(month_num, []).append(frame)
+        month_key = (ts.year, ts.month)
+        frames_by_month.setdefault(month_key, []).append(frame)
 
     stem = output_video.stem
     suffix = output_video.suffix
     parent = output_video.parent
 
-    for month_num in sorted(frames_by_month.keys()):
+    for year_num, month_num in sorted(frames_by_month.keys()):
         month_short = calendar.month_abbr[month_num].lower()
-        monthly_output = parent / f"{stem}-{month_short}{suffix}"
+        monthly_output = parent / f"{stem}-{year_num}-{month_short}{suffix}"
         render_video_target(
-            frames_by_month[month_num],
+            frames_by_month[(year_num, month_num)],
             monthly_output,
             fps,
             state,
             rerender_all,
             env,
-            label=month_short,
+            label=f"{year_num}-{month_short}",
         )
 
     save_state(state_path, state)
